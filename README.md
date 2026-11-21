@@ -35,3 +35,7 @@ python3 -m venv .ocr-venv
 ```
 
 `fork/raganything` 包含上游 Python 源码及 Demo 的检索、补读、表格处理等改动。许可证见 [LICENSE](LICENSE)。
+
+## 视觉问答补读实验
+
+[视觉问答补读实验](experiments/README.md)

@@ -223,18 +223,23 @@ class SemanticCache:
 
 class ResumeRetriever:
     def __init__(self, *, items, directory, doc_id, filename, models, ocr_python, ocr_script,
-                 ocr_timeout=300, ocr_workers=1, review_on_refusal=False):
+                 ocr_timeout=300, ocr_workers=1, review_on_refusal=False, answer_page_limit=PAGE_CONTEXT_LIMIT):
+        if answer_page_limit < 1:
+            raise ValueError('answer_page_limit must be positive')
         self.items, self.directory = items, Path(directory)
         self.doc_id, self.filename, self.models = doc_id, filename, models
         self.ocr_python, self.ocr_script = Path(ocr_python), Path(ocr_script)
         self.ocr_timeout = ocr_timeout
         self.ocr_workers = ocr_workers
         self.review_on_refusal = review_on_refusal
+        self.answer_page_limit = answer_page_limit
         self.directory.mkdir(parents=True, exist_ok=True)
         self.vector_store = QdrantClient(path=str(self.directory / 'qdrant'))
         identity = getattr(models, 'answer_identity', getattr(models, 'answer_model', ''))
         model_key = hashlib.sha256(str(identity).encode()).hexdigest()[:12]
         cache_version = 'v3' if review_on_refusal else 'v2'
+        if answer_page_limit != PAGE_CONTEXT_LIMIT:
+            cache_version += f'-p{answer_page_limit}'
         self.cache = SemanticCache(self.directory / f'grounded-answers-pages-{cache_version}-{model_key}.sqlite3')
         self.pdf_path = self.directory.parent / 'source.pdf'
         self.caption_targets = None
@@ -560,7 +565,7 @@ class ResumeRetriever:
         sources = []
         with pymupdf.open(self.pdf_path) as pdf:
             # Keep the IDs stable and preserve the PDF reading order for cross-page questions.
-            for candidate in sorted(pages[:PAGE_CONTEXT_LIMIT], key=lambda page: page['page']):
+            for candidate in sorted(pages[:self.answer_page_limit], key=lambda page: page['page']):
                 number = candidate['page']
                 page = pdf[number - 1]
                 size = max(page.rect.width, page.rect.height)
@@ -606,7 +611,7 @@ class ResumeRetriever:
         anchors = requested_pages(question)
         if anchors:
             with pymupdf.open(self.pdf_path) as pdf:
-                anchors = [number for number in anchors if 1 <= number <= pdf.page_count][:PAGE_CONTEXT_LIMIT]
+                anchors = [number for number in anchors if 1 <= number <= pdf.page_count][:self.answer_page_limit]
             ranked = {page['page']: page for page in pages}
             forced = [ranked.get(number, {'page': number, 'score': 0.0, 'blocks': []}) for number in anchors]
             pages = forced + [page for page in pages if page['page'] not in anchors]
@@ -641,8 +646,10 @@ class ResumeRetriever:
                 ids = [source_id]
                 trace['answer_method'] = 'table_cells'
         images_seen = 0
+        answer_pages = []
         if not ids and sources:
             raw = await self.generate(PAGE_ANSWER_PROMPT + question, sources, 220)
+            answer_pages = [source['page'] for source in sources]
             output = json_object(raw)
             answer = output.get('answer')
             if type(answer) in {int, float}:
@@ -658,7 +665,8 @@ class ResumeRetriever:
         citations = [] if refused else [
             {'page': page, 'file_path': self.filename, 'doc_id': self.doc_id} for page in ids
         ]
-        trace.update(verification_pages=[source['page'] for source in sources], verification_mode='full_pages',
+        trace.update(answer_page_limit=self.answer_page_limit, answer_pages=answer_pages,
+                     verification_pages=[source['page'] for source in sources], verification_mode='full_pages',
                      sufficiency={'supported': not refused, 'pages': [] if refused else ids, 'missing': []})
         result = {'question': question, 'answer': '证据不足，无法回答。' if refused else answer.strip(),
                 'refused': refused, 'citations': citations, 'trace': trace, 'cache_hit': False,

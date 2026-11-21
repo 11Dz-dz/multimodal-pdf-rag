@@ -25,6 +25,7 @@ from raganything.resume_retrieval import ResumeRetriever
 
 MAX_BYTES = 20 * 1024 * 1024
 MAX_PAGES = 40
+DEFAULT_ANSWER_PAGE_LIMIT = 8
 LOG = logging.getLogger('uvicorn.error')
 BenchmarkRun = Literal['full-run-v1', 'full-run-v2', 'full-run-v3', 'full-run-v4', 'full-run-haiku']
 
@@ -95,7 +96,8 @@ class PdfLibrary:
                                    ocr_python=self.args.ocr_python, ocr_script=ROOT / 'paddle_worker.py',
                                    ocr_timeout=7200 if self.benchmark else 300,
                                    ocr_workers=getattr(self.args, 'ocr_workers', 1),
-                                   review_on_refusal=getattr(self.args, 'review_on_refusal', False))
+                                   review_on_refusal=getattr(self.args, 'review_on_refusal', False),
+                                   answer_page_limit=getattr(self.args, 'answer_page_limit', DEFAULT_ANSWER_PAGE_LIMIT))
         try:
             await demo.initialize()
         except BaseException:
@@ -344,6 +346,8 @@ if __name__ == '__main__':
     cli.add_argument('--answer-native-claude', action='store_true', help='Use the gateway Claude Messages endpoint')
     cli.add_argument('--index-workers', type=int, choices=range(1, 9), default=2)
     cli.add_argument('--answer-batch-size', type=int, choices=range(1, 9), default=1)
+    cli.add_argument('--answer-page-limit', type=int, choices=range(1, 13), default=DEFAULT_ANSWER_PAGE_LIMIT,
+                     help='Maximum number of PDF pages sent in the first visual answer request')
     cli.add_argument('--review-on-refusal', action='store_true', help='Reread focused PDF passages after a refusal')
     cli.add_argument('--mineru-api')
     cli.add_argument('--ocr-workers', type=int, default=1, choices=range(1, 5))

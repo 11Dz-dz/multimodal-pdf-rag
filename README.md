@@ -24,6 +24,7 @@ python3 -m venv .ocr-venv
 访问 <http://127.0.0.1:8094> 上传 PDF。用 `--backend baseline` 启动上游检索链路，用 `--review-on-refusal` 启用拒答后的证据补读。
 
 使用兼容 API 作答时，将 `.env.example` 复制为 `.env` 并填入自己的配置，启动时附加 `--answer-env-file .env`。该模式会将候选页图像和证据文字发给配置的服务。
+视觉问答首轮默认发送最多 8 张证据页图。可用 `--answer-page-limit 4` 调整页数上限。使用 API 中转时，可加 `--answer-compact-images` 压缩页图。评估接口在 `trace.answer_pages` 返回本次首轮作答发送的 PDF 页码。
 
 ## 评测
 

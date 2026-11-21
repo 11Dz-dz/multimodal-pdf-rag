@@ -1,0 +1,15 @@
+.env*
+!.env.example
+.venv/
+.mineru-venv/
+.ocr-venv/
+__pycache__/
+models/
+runtime*/
+data/
+uploads/
+*.pdf
+*.log
+*.zip
+*.db
+*.sqlite*

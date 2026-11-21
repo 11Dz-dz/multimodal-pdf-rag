@@ -1,0 +1,17 @@
+# Application dependencies. RAG-Anything 1.4.4 source is provided in fork/.
+lightrag-hku==1.4.16
+PyMuPDF>=1.24,<2
+Pillow>=10
+numpy<2
+rapidocr-onnxruntime==1.4.4
+opencv-python==4.11.0.86
+sentence-transformers>=3,<6
+transformers>=4.57.3,<5
+accelerate>=1
+fastapi>=0.115,<1
+python-multipart>=0.0.18
+python-dotenv>=1,<2
+uvicorn>=0.30,<1
+qdrant-client>=1.13,<2
+rank-bm25==0.2.2
+jieba==0.42.1

@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>多模态检索</title>
+  <style>
+    :root { color-scheme: light; --ink:#222c36; --muted:#596774; --border:#dce3e7; --green:#16645f; }
+    [hidden] { display:none !important; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:#f3f6f6; color:var(--ink); font:15px/1.6 system-ui,"Microsoft YaHei",sans-serif; }
+    main { max-width:1050px; margin:auto; padding:32px 22px 55px; }
+    h1 { margin:0; font-size:clamp(25px,4vw,35px); line-height:1.25; }
+    h2 { margin:0 0 12px; font-size:18px; }
+    p { margin:.5em 0; }
+    .muted { color:var(--muted); }
+    .layout { display:grid; grid-template-columns:minmax(0,1.5fr) minmax(0,1fr); gap:16px; margin-top:22px; }
+    section { padding:20px; background:white; border:1px solid var(--border); border-radius:12px; }
+    .upload { margin-top:20px; }
+    .upload form { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+    input[type=file] { font:inherit; max-width:100%; }
+    #benchmark-document { width:100%; font:inherit; padding:8px 10px; border:1px solid #aebdc4; border-radius:7px; }
+    #document-name { overflow-wrap:anywhere; }
+    .buttons { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px; }
+    button { border:1px solid var(--border); background:white; color:var(--ink); padding:8px 12px; border-radius:7px; cursor:pointer; font:inherit; }
+    button:disabled { opacity:.65; cursor:wait; }
+    button.primary { background:var(--green); color:white; border-color:var(--green); }
+    textarea { display:block; min-height:86px; width:100%; resize:vertical; font:inherit; padding:10px 12px; border:1px solid #aebdc4; border-radius:7px; }
+    .actions { margin-top:12px; display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+    .answer { margin-top:18px; white-space:pre-wrap; overflow-wrap:anywhere; }
+    #preview { width:100%; max-height:430px; object-fit:contain; border:1px solid var(--border); background:#f8f9fa; border-radius:8px; }
+    a { color:var(--green); }
+    details { margin-top:16px; }
+    summary { cursor:pointer; }
+    pre { white-space:pre-wrap; overflow-wrap:anywhere; max-height:430px; overflow:auto; background:#f3f6f6; padding:13px; border-radius:7px; font-size:12px; }
+    @media (max-width:700px) { .layout{grid-template-columns:1fr} main{padding:22px 14px 36px} section{padding:16px} }
+  </style>
+</head>
+<body>
+<main>
+  <h1>多模态检索</h1>
+  <section id="benchmark" class="upload" hidden>
+    <h2>MMLongBench-Doc 测试集</h2>
+    <label for="benchmark-document">选择 PDF</label>
+    <select id="benchmark-document"><option value="">请选择文档</option></select>
+    <p><a href="/api/benchmark/test-set">下载题目、标准答案和证据页</a></p>
+  </section>
+  <section class="upload">
+    <h2>上传 PDF</h2>
+    <form id="upload-form">
+      <input id="pdf-file" name="file" type="file" accept=".pdf,application/pdf" required aria-label="选择 PDF">
+      <button id="upload-button" class="primary">上传并建索引</button>
+    </form>
+    <p class="muted">单个 PDF 最大 20 MB，最多 40 页。</p>
+    <p id="upload-status" role="status" hidden></p>
+    <p id="document-name" hidden></p>
+  </section>
+  <div id="workspace" class="layout" hidden>
+    <section>
+      <h2>文档问答</h2>
+      <form id="form">
+        <label for="question">问题</label>
+        <textarea id="question" maxlength="400" placeholder="输入你想在这份 PDF 中查找的问题" required></textarea>
+        <div class="actions">
+          <button id="submit" class="primary">检索并回答</button>
+          <label><input id="visual" type="checkbox" checked> 把命中的原图交给模型</label>
+        </div>
+      </form>
+      <p id="status" class="muted" role="status"></p>
+      <div id="answer" class="answer" aria-live="polite"></div>
+      <details id="trace-pane" hidden><summary>查看检索与证据核验</summary><pre id="trace"></pre></details>
+    </section>
+    <section>
+      <h2>文档预览</h2>
+      <p class="muted">检索后可切换到候选证据页。</p>
+      <div id="pages" class="buttons"></div>
+      <a id="preview-link" target="_blank" rel="noopener"><img id="preview" alt="当前 PDF 页"></a>
+      <p><a id="document" target="_blank" rel="noopener">打开原始 PDF</a> · <a href="/docs">API 文档</a></p>
+    </section>
+  </div>
+</main>
+<script>
+  const get = id => document.getElementById(id);
+  let activeDocument;
+  const benchmarkDocuments = new Map();
+  const sessionKey = 'multimodal-active-pdf';
+
+  async function api(url, options) {
+    const response = await fetch(url, options);
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const message = typeof data.detail === 'string' ? data.detail : '请求失败（' + response.status + '）';
+      const error = new Error(message);
+      error.status = response.status;
+      throw error;
+    }
+    return data;
+  }
+
+  function documentUrl() {
+    return '/api/documents/' + encodeURIComponent(activeDocument.id);
+  }
+
+  function showPage(page) {
+    const url = documentUrl() + '/pages/' + page;
+    get('preview').src = url;
+    get('preview').alt = '第 ' + page + ' 页';
+    get('preview-link').href = url;
+    get('document').href = documentUrl() + '/pdf#page=' + page;
+  }
+
+  function openDocument(data) {
+    activeDocument = data;
+    sessionStorage.setItem(sessionKey, data.id);
+    get('document-name').textContent = data.filename + ' · ' + data.pages + ' 页';
+    get('document-name').hidden = false;
+    if (benchmarkDocuments.has(data.id)) get('benchmark-document').value = data.id;
+    get('workspace').hidden = false;
+    get('question').value = '';
+    get('answer').textContent = '';
+    get('status').textContent = '';
+    get('pages').replaceChildren();
+    get('trace-pane').hidden = true;
+    get('trace-pane').open = false;
+    showPage(1);
+  }
+
+  function busy(value) {
+    get('submit').disabled = value;
+    get('upload-button').disabled = value;
+    get('pdf-file').disabled = value;
+    get('benchmark-document').disabled = value;
+  }
+
+  get('upload-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const file = get('pdf-file').files[0];
+    if (!file) return;
+    const status = get('upload-status');
+    status.hidden = false;
+    if (!file.name.toLowerCase().endsWith('.pdf') || file.size > 20 * 1024 * 1024) {
+      status.textContent = '请选择 20 MB 以内的 PDF。';
+      return;
+    }
+    const form = new FormData();
+    form.append('file', file);
+    busy(true);
+    status.textContent = '正在上传、解析并建立索引，请保持页面打开。';
+    try {
+      const data = await api('/api/documents', {method:'POST', body:form});
+      openDocument(data);
+      status.textContent = '已建立索引，可以提问。';
+      get('question').focus();
+    } catch (error) {
+      status.textContent = error.message;
+    } finally {
+      busy(false);
+    }
+  });
+
+  get('form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const question = get('question').value.trim();
+    if (!activeDocument || !question) return;
+    busy(true);
+    const benchmarkDocument = benchmarkDocuments.get(activeDocument.id);
+    get('status').textContent = benchmarkDocument && !benchmarkDocument.indexed
+      ? '正在首次解析并建立索引，完成后会继续回答。' : '正在检索并生成回答。';
+    get('answer').textContent = '';
+    get('trace-pane').hidden = true;
+    get('pages').replaceChildren();
+    try {
+      const data = await api(documentUrl() + '/ask', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({question, visual:get('visual').checked})
+      });
+      if (benchmarkDocument) benchmarkDocument.indexed = true;
+      get('answer').textContent = data.answer;
+      for (const citation of data.citations || []) {
+        const link = document.createElement('a');
+        link.href = documentUrl() + '/pdf#page=' + citation.page;
+        link.target = '_blank';
+        link.rel = 'noopener';
+        const reference = citation.reference ? ' · ' + citation.reference : '';
+        link.textContent = '〔第 ' + citation.page + ' 页' + reference + '〕';
+        get('answer').append(' ', link);
+      }
+      get('trace').textContent = JSON.stringify(data.trace ? {...data.trace, chunks:data.retrieval} : data.retrieval, null, 2);
+      get('trace-pane').hidden = false;
+      const pages = [...new Set(data.retrieval.map(chunk => chunk.page).filter(Number.isInteger))];
+      if (pages.length) showPage(pages[0]);
+      for (const page of pages) {
+        const button = document.createElement('button');
+        button.textContent = '第 ' + page + ' 页';
+        button.addEventListener('click', () => showPage(page));
+        get('pages').append(button);
+      }
+      get('status').textContent = data.cache_hit ? '已命中缓存' : '本次使用图像 ' + data.images_seen_by_model + ' 张';
+    } catch (error) {
+      get('status').textContent = error.message;
+    } finally {
+      busy(false);
+    }
+  });
+  get('benchmark-document').addEventListener('change', event => {
+    const data = benchmarkDocuments.get(event.target.value);
+    if (data) openDocument(data);
+  });
+
+  async function restoreDocument() {
+    const lastDocument = sessionStorage.getItem(sessionKey);
+    busy(true);
+    try {
+      const status = await api('/api/status');
+      if (status.benchmark) {
+        const documents = await api('/api/benchmark/documents');
+        for (const doc of documents) {
+          benchmarkDocuments.set(doc.id, doc);
+          const option = document.createElement('option');
+          option.value = doc.id;
+          option.textContent = doc.filename + ' · ' + doc.pages + ' 页 · ' + doc.questions + ' 道题';
+          get('benchmark-document').append(option);
+        }
+        get('benchmark').hidden = false;
+      }
+      if (lastDocument) openDocument(await api('/api/documents/' + encodeURIComponent(lastDocument)));
+    } catch (error) {
+      if (error.status === 404) sessionStorage.removeItem(sessionKey);
+    } finally {
+      busy(false);
+    }
+  }
+  restoreDocument();
+</script>
+</body>
+</html>

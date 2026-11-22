@@ -3,6 +3,7 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import os
 import shutil
 import signal
@@ -20,7 +21,11 @@ from pydantic import BaseModel, Field
 
 from answer_relay import AnswerAPIError, AnswerRelay
 from demo import Demo, LocalModels, ROOT, model_arguments, resolve_mineru_items
+from raganything.agent_qa import agent_answer
+from raganything.rank_fusion import PAGE_FUSION_METHOD, PAGE_RRF_K, PAGE_TEXT_HEADS, PAGE_VISUAL_HEADS, PAGE_VISUAL_WEIGHT
 from raganything.resume_retrieval import ResumeRetriever
+from raganything.visual_index import MODEL as VISUAL_MODEL
+from raganything.visual_index import VisualIndexError, VisualPageIndex, VisualWorker
 
 
 MAX_BYTES = 20 * 1024 * 1024
@@ -52,6 +57,12 @@ class PdfLibrary:
         self.benchmark = getattr(args, 'benchmark', None)
         self.mineru_api = getattr(args, 'mineru_api', None)
         self.answer_relay = getattr(args, 'answer_relay', None)
+        self.qa_mode = getattr(args, 'qa_mode', 'static')
+        self.visual_worker = None
+        if (args.backend == 'resume' and getattr(args, 'visual_python', None)
+                and getattr(args, 'visual_weight', PAGE_VISUAL_WEIGHT)):
+            self.visual_worker = VisualWorker(args.visual_python, args.visual_model, device=args.visual_device or args.device,
+                                              base_model=args.visual_base_model)
 
     def metadata(self, doc_id):
         path = self.root / doc_id.hex / 'document.json'
@@ -90,14 +101,23 @@ class PdfLibrary:
             demo = Demo(self.pdf_path(doc_id), self.args.models, self.args.device, directory / 'index',
                         content_list, models=self.models, workspace=doc_id.hex, filename=metadata['filename'])
         else:
+            index_dir = directory / 'resume-index-v1'
+            visual_index = (VisualPageIndex(self.visual_worker, self.pdf_path(doc_id), index_dir, doc_id.hex)
+                            if self.visual_worker else None)
             demo = ResumeRetriever(items=resolve_mineru_items(content_list, include_charts=True),
-                                   directory=directory / 'resume-index-v1',
+                                   directory=index_dir,
                                    doc_id=doc_id.hex, filename=metadata['filename'], models=self.models,
                                    ocr_python=self.args.ocr_python, ocr_script=ROOT / 'paddle_worker.py',
                                    ocr_timeout=7200 if self.benchmark else 300,
                                    ocr_workers=getattr(self.args, 'ocr_workers', 1),
                                    review_on_refusal=getattr(self.args, 'review_on_refusal', False),
-                                   answer_page_limit=getattr(self.args, 'answer_page_limit', DEFAULT_ANSWER_PAGE_LIMIT))
+                                   answer_page_limit=getattr(self.args, 'answer_page_limit', DEFAULT_ANSWER_PAGE_LIMIT),
+                                   visual_index=visual_index,
+                                   visual_weight=getattr(self.args, 'visual_weight', PAGE_VISUAL_WEIGHT),
+                                   visual_fusion=getattr(self.args, 'visual_fusion', PAGE_FUSION_METHOD),
+                                   visual_rrf_k=getattr(self.args, 'visual_rrf_k', PAGE_RRF_K),
+                                   visual_text_heads=getattr(self.args, 'visual_text_heads', PAGE_TEXT_HEADS),
+                                   visual_heads=getattr(self.args, 'visual_heads', PAGE_VISUAL_HEADS))
         try:
             await demo.initialize()
         except BaseException:
@@ -109,6 +129,11 @@ class PdfLibrary:
     async def load_models(self):
         return await asyncio.to_thread(LocalModels, self.args.models, self.args.device,
                                        self.args.answer_model, self.args.answer_batch_size, self.answer_relay)
+
+    async def answer(self, retriever, question, *, visual=True, **options):
+        if self.qa_mode == 'agent' and visual:
+            return await agent_answer(retriever, question, self.answer_relay, vector=options.get('vector'))
+        return await retriever.answer(question, visual=visual, **options)
 
     async def parse(self, directory):
         if not self.mineru.is_file():
@@ -177,6 +202,11 @@ class PdfLibrary:
                 metadata = {'id': str(doc_id), 'filename': filename, 'pages': page_count}
                 metadata['content_list'] = await self.parse(directory)
                 demo = await self.activate(doc_id, metadata)
+                if getattr(demo, 'visual_index', None) is not None:
+                    try:
+                        await demo.visual_index.build()
+                    except (VisualIndexError, OSError) as exc:
+                        LOG.warning('Visual indexing deferred for document %s: %s', doc_id, exc)
                 metadata.update(items=len(demo.items),
                                 tables=sum(item['type'] == 'table' for item in demo.items),
                                 images=sum(item['type'] == 'image' for item in demo.items))
@@ -197,7 +227,11 @@ def make_app(args):
         try:
             yield
         finally:
-            await library.close()
+            try:
+                await library.close()
+            finally:
+                if library.visual_worker:
+                    await library.visual_worker.close()
 
     app = FastAPI(title='多模态检索', lifespan=lifespan)
 
@@ -271,7 +305,7 @@ def make_app(args):
             lock = index_locks.setdefault(doc_id, asyncio.Lock())
             async with lock, library.lock:
                 demo = await library.activate(doc_id, library.metadata(doc_id))
-                return await demo.answer(query.question.strip(), visual=query.visual, use_cache=False)
+                return await library.answer(demo, query.question.strip(), visual=query.visual, use_cache=False)
 
         @app.post('/api/benchmark/documents/{doc_id}/evaluate-batch')
         async def benchmark_evaluate_batch(doc_id: UUID, batch: QuestionBatch):
@@ -280,7 +314,7 @@ def make_app(args):
                 demo = await library.activate(doc_id, library.metadata(doc_id))
                 questions = [query.question.strip() for query in batch.questions]
                 vectors = await demo.models.embed(questions)
-                results = await asyncio.gather(*(demo.answer(question, visual=query.visual, use_cache=False,
+                results = await asyncio.gather(*(library.answer(demo, question, visual=query.visual, use_cache=False,
                                                               vector=vector)
                                                  for question, query, vector in zip(questions, batch.questions, vectors)),
                                                return_exceptions=True)
@@ -324,7 +358,7 @@ def make_app(args):
         async with lock, library.lock:
             metadata = library.metadata(doc_id)
             demo = await library.activate(doc_id, metadata)
-            return await demo.answer(question, visual=query.visual)
+            return await library.answer(demo, question, visual=query.visual)
 
     return app
 
@@ -344,6 +378,7 @@ if __name__ == '__main__':
     cli.add_argument('--answer-compact-images', action='store_true', help='Compress page images for the relay')
     cli.add_argument('--answer-api-timeout', type=int, choices=range(10, 181), default=100)
     cli.add_argument('--answer-native-claude', action='store_true', help='Use the gateway Claude Messages endpoint')
+    cli.add_argument('--qa-mode', choices=('static', 'agent'), default='static')
     cli.add_argument('--index-workers', type=int, choices=range(1, 9), default=2)
     cli.add_argument('--answer-batch-size', type=int, choices=range(1, 9), default=1)
     cli.add_argument('--answer-page-limit', type=int, choices=range(1, 13), default=DEFAULT_ANSWER_PAGE_LIMIT,
@@ -351,7 +386,20 @@ if __name__ == '__main__':
     cli.add_argument('--review-on-refusal', action='store_true', help='Reread focused PDF passages after a refusal')
     cli.add_argument('--mineru-api')
     cli.add_argument('--ocr-workers', type=int, default=1, choices=range(1, 5))
+    cli.add_argument('--visual-python', type=Path, help='Python executable in the isolated visual retrieval environment')
+    cli.add_argument('--visual-model', default=VISUAL_MODEL, help='ColQwen2.5 model ID or pinned local snapshot')
+    cli.add_argument('--visual-base-model', type=Path, help='Local Qwen2.5-VL-3B base checkpoint for the adapter')
+    cli.add_argument('--visual-device', help='ColQwen2.5 device, defaulting to --device')
+    cli.add_argument('--visual-weight', type=float, default=PAGE_VISUAL_WEIGHT, help='Visual weight in page fusion')
+    cli.add_argument('--visual-fusion', choices=('rrf', 'minmax'), default=PAGE_FUSION_METHOD)
+    cli.add_argument('--visual-rrf-k', type=int, default=PAGE_RRF_K)
+    cli.add_argument('--visual-text-heads', type=int, choices=range(0, 13), default=PAGE_TEXT_HEADS)
+    cli.add_argument('--visual-heads', type=int, choices=range(0, 13), default=PAGE_VISUAL_HEADS)
     args = cli.parse_args()
+    if not math.isfinite(args.visual_weight) or args.visual_weight < 0:
+        cli.error('--visual-weight must be finite and nonnegative')
+    if args.visual_rrf_k < 1:
+        cli.error('--visual-rrf-k must be positive')
     relay_settings = dotenv_values(args.answer_env_file, interpolate=False) if args.answer_env_file else {}
     relay_base = args.answer_api_base or relay_settings.get('RAG_ANSWER_API_BASE') or os.getenv('RAG_ANSWER_API_BASE')
     args.answer_relay = None
@@ -366,6 +414,9 @@ if __name__ == '__main__':
             cli.error(str(exc))
     elif args.answer_env_file:
         cli.error('RAG_ANSWER_API_BASE is required in the answer configuration')
+    if args.qa_mode == 'agent' and (args.backend != 'resume' or args.answer_relay is None
+                                    or args.visual_python is None or not args.visual_weight):
+        cli.error('--qa-mode agent requires the resume backend, an answer gateway and visual retrieval')
     args.mineru = args.mineru.resolve()
     args.ocr_python = args.ocr_python.absolute()
     os.environ['PATH'] = str(args.mineru.parent) + os.pathsep + os.environ.get('PATH', '')

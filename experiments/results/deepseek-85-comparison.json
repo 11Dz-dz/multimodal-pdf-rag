@@ -1,0 +1,323 @@
+{
+  "model": "deepseek-v4.1-flash-1017",
+  "metrics": {
+    "deepseek-v4.1-flash-1017": {
+      "all": {
+        "total": 85,
+        "scored": 85,
+        "correct": 60,
+        "false_refusals": 2,
+        "mean_seconds": 12.131431513163946,
+        "median_seconds": 8.559444244019687,
+        "mean_turns": 2.164705882352941
+      },
+      "single_page": {
+        "total": 30,
+        "scored": 30,
+        "correct": 25,
+        "false_refusals": 0,
+        "mean_seconds": 7.035569988266798,
+        "median_seconds": 3.8973451325146016,
+        "mean_turns": 1.4333333333333333
+      },
+      "cross_page": {
+        "total": 30,
+        "scored": 30,
+        "correct": 18,
+        "false_refusals": 2,
+        "mean_seconds": 15.481938482892778,
+        "median_seconds": 11.550781598984031,
+        "mean_turns": 2.2
+      },
+      "unanswerable": {
+        "total": 25,
+        "scored": 25,
+        "correct": 17,
+        "false_refusals": 0,
+        "mean_seconds": 14.225856979365926,
+        "median_seconds": 12.778869855974335,
+        "mean_turns": 3
+      }
+    },
+    "qwen3.8-flash": {
+      "all": {
+        "total": 85,
+        "scored": 85,
+        "correct": 64,
+        "false_refusals": 2,
+        "mean_seconds": 18.03657249069759,
+        "median_seconds": 13.364130846981425,
+        "mean_turns": 2.1058823529411765
+      },
+      "single_page": {
+        "total": 30,
+        "scored": 30,
+        "correct": 24,
+        "false_refusals": 1,
+        "mean_seconds": 12.611474545602686,
+        "median_seconds": 7.501845058024628,
+        "mean_turns": 1.5
+      },
+      "cross_page": {
+        "total": 30,
+        "scored": 30,
+        "correct": 20,
+        "false_refusals": 1,
+        "mean_seconds": 20.069460399933934,
+        "median_seconds": 17.42149003848317,
+        "mean_turns": 2.3333333333333335
+      },
+      "unanswerable": {
+        "total": 25,
+        "scored": 25,
+        "correct": 20,
+        "false_refusals": 0,
+        "mean_seconds": 22.10722453372786,
+        "median_seconds": 20.751441016967874,
+        "mean_turns": 2.56
+      }
+    },
+    "qwen3.8-max": {
+      "all": {
+        "total": 85,
+        "scored": 84,
+        "correct": 68,
+        "false_refusals": 1,
+        "mean_seconds": 64.5202447718489,
+        "median_seconds": 33.94295410302584,
+        "mean_turns": 2.0357142857142856
+      },
+      "single_page": {
+        "total": 30,
+        "scored": 29,
+        "correct": 29,
+        "false_refusals": 0,
+        "mean_seconds": 26.76864710862644,
+        "median_seconds": 12.805012344033457,
+        "mean_turns": 1.2413793103448276
+      },
+      "cross_page": {
+        "total": 30,
+        "scored": 30,
+        "correct": 23,
+        "false_refusals": 1,
+        "mean_seconds": 73.58120338737305,
+        "median_seconds": 36.843022257991834,
+        "mean_turns": 2.1333333333333333
+      },
+      "unanswerable": {
+        "total": 25,
+        "scored": 25,
+        "correct": 16,
+        "false_refusals": 0,
+        "mean_seconds": 97.43894772255793,
+        "median_seconds": 73.87969770695781,
+        "mean_turns": 2.84
+      }
+    },
+    "qwen3.7-plus": {
+      "all": {
+        "total": 85,
+        "scored": 85,
+        "correct": 64,
+        "false_refusals": 1,
+        "mean_seconds": 20.347707972554353,
+        "median_seconds": 14.57614622800611,
+        "mean_turns": 1.964705882352941
+      },
+      "single_page": {
+        "total": 30,
+        "scored": 30,
+        "correct": 26,
+        "false_refusals": 0,
+        "mean_seconds": 15.997634341734617,
+        "median_seconds": 9.171709471993381,
+        "mean_turns": 1.3
+      },
+      "cross_page": {
+        "total": 30,
+        "scored": 30,
+        "correct": 20,
+        "false_refusals": 1,
+        "mean_seconds": 23.92933453853281,
+        "median_seconds": 22.331337896495825,
+        "mean_turns": 2.1666666666666665
+      },
+      "unanswerable": {
+        "total": 25,
+        "scored": 25,
+        "correct": 18,
+        "false_refusals": 0,
+        "mean_seconds": 21.26984445036389,
+        "median_seconds": 15.839975351002067,
+        "mean_turns": 2.52
+      }
+    },
+    "claude-haiku-5-5": {
+      "all": {
+        "total": 85,
+        "scored": 85,
+        "correct": 59,
+        "false_refusals": 0,
+        "mean_seconds": 10.685382459647542,
+        "median_seconds": 7.976404683024157,
+        "mean_turns": 1.423529411764706
+      },
+      "single_page": {
+        "total": 30,
+        "scored": 30,
+        "correct": 24,
+        "false_refusals": 0,
+        "mean_seconds": 8.410038189665647,
+        "median_seconds": 7.077563642000314,
+        "mean_turns": 1.1333333333333333
+      },
+      "cross_page": {
+        "total": 30,
+        "scored": 30,
+        "correct": 17,
+        "false_refusals": 0,
+        "mean_seconds": 11.450040450771727,
+        "median_seconds": 7.690895547508262,
+        "mean_turns": 1.4
+      },
+      "unanswerable": {
+        "total": 25,
+        "scored": 25,
+        "correct": 18,
+        "false_refusals": 0,
+        "mean_seconds": 12.498205994276795,
+        "median_seconds": 10.87104920798447,
+        "mean_turns": 1.8
+      }
+    }
+  },
+  "paired": {
+    "qwen3.8-flash": {
+      "all": {
+        "comparable": 85,
+        "baseline_correct": 64,
+        "deepseek_correct": 60,
+        "deepseek_only_correct": 6,
+        "baseline_only_correct": 10
+      },
+      "single_page": {
+        "comparable": 30,
+        "baseline_correct": 24,
+        "deepseek_correct": 25,
+        "deepseek_only_correct": 3,
+        "baseline_only_correct": 2
+      },
+      "cross_page": {
+        "comparable": 30,
+        "baseline_correct": 20,
+        "deepseek_correct": 18,
+        "deepseek_only_correct": 3,
+        "baseline_only_correct": 5
+      },
+      "unanswerable": {
+        "comparable": 25,
+        "baseline_correct": 20,
+        "deepseek_correct": 17,
+        "deepseek_only_correct": 0,
+        "baseline_only_correct": 3
+      }
+    },
+    "qwen3.8-max": {
+      "all": {
+        "comparable": 84,
+        "baseline_correct": 68,
+        "deepseek_correct": 60,
+        "deepseek_only_correct": 2,
+        "baseline_only_correct": 10
+      },
+      "single_page": {
+        "comparable": 29,
+        "baseline_correct": 29,
+        "deepseek_correct": 25,
+        "deepseek_only_correct": 0,
+        "baseline_only_correct": 4
+      },
+      "cross_page": {
+        "comparable": 30,
+        "baseline_correct": 23,
+        "deepseek_correct": 18,
+        "deepseek_only_correct": 0,
+        "baseline_only_correct": 5
+      },
+      "unanswerable": {
+        "comparable": 25,
+        "baseline_correct": 16,
+        "deepseek_correct": 17,
+        "deepseek_only_correct": 2,
+        "baseline_only_correct": 1
+      }
+    },
+    "qwen3.7-plus": {
+      "all": {
+        "comparable": 85,
+        "baseline_correct": 64,
+        "deepseek_correct": 60,
+        "deepseek_only_correct": 4,
+        "baseline_only_correct": 8
+      },
+      "single_page": {
+        "comparable": 30,
+        "baseline_correct": 26,
+        "deepseek_correct": 25,
+        "deepseek_only_correct": 1,
+        "baseline_only_correct": 2
+      },
+      "cross_page": {
+        "comparable": 30,
+        "baseline_correct": 20,
+        "deepseek_correct": 18,
+        "deepseek_only_correct": 2,
+        "baseline_only_correct": 4
+      },
+      "unanswerable": {
+        "comparable": 25,
+        "baseline_correct": 18,
+        "deepseek_correct": 17,
+        "deepseek_only_correct": 1,
+        "baseline_only_correct": 2
+      }
+    },
+    "claude-haiku-5-5": {
+      "all": {
+        "comparable": 85,
+        "baseline_correct": 59,
+        "deepseek_correct": 60,
+        "deepseek_only_correct": 8,
+        "baseline_only_correct": 7
+      },
+      "single_page": {
+        "comparable": 30,
+        "baseline_correct": 24,
+        "deepseek_correct": 25,
+        "deepseek_only_correct": 3,
+        "baseline_only_correct": 2
+      },
+      "cross_page": {
+        "comparable": 30,
+        "baseline_correct": 17,
+        "deepseek_correct": 18,
+        "deepseek_only_correct": 4,
+        "baseline_only_correct": 3
+      },
+      "unanswerable": {
+        "comparable": 25,
+        "baseline_correct": 18,
+        "deepseek_correct": 17,
+        "deepseek_only_correct": 1,
+        "baseline_only_correct": 2
+      }
+    }
+  },
+  "retry_overrides": {
+    "a66c3db2a8f2": {
+      "max_tokens": 8192,
+      "reason": "output truncation persisted at the default 1986 tokens"
+    }
+  }
+}

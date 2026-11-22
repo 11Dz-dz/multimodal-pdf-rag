@@ -1,0 +1,138 @@
+{
+  "unanswerable_wrong": {
+    "questions": 89,
+    "turns": {
+      "2": 25,
+      "1": 25,
+      "3": 16,
+      "4": 23
+    },
+    "turns_gte_2": 64,
+    "actually_opened_additional_pages": 36,
+    "first_three_exact_order": 89,
+    "first_three_same_set": 89,
+    "text": {
+      "n": 89,
+      "minimum": 0.0002846717834472656,
+      "p10": 0.004852294921875,
+      "p25": 0.02069091796875,
+      "median": 0.307861328125,
+      "mean": 0.41821920737791596,
+      "p75": 0.8505859375,
+      "p90": 0.95986328125,
+      "maximum": 0.998046875
+    },
+    "text_at_least_0_99": 4,
+    "text_saturated_at_1": 0,
+    "visual": {
+      "n": 89,
+      "minimum": 12.086669921875,
+      "p10": 13.356982421875,
+      "p25": 15.3394775390625,
+      "median": 20.1646728515625,
+      "mean": 23.314390032478933,
+      "p75": 26.9365234375,
+      "p90": 38.23193359375,
+      "maximum": 57.64501953125
+    },
+    "markers": {
+      "combined": {
+        "eligible": 54,
+        "no_marker": 35,
+        "any_match": 36,
+        "all_match": 17
+      },
+      "name_or_label": {
+        "eligible": 46,
+        "no_marker": 43,
+        "any_match": 28,
+        "all_match": 19
+      },
+      "year": {
+        "eligible": 16,
+        "no_marker": 73,
+        "any_match": 9,
+        "all_match": 6
+      },
+      "metric": {
+        "eligible": 4,
+        "no_marker": 85,
+        "any_match": 4,
+        "all_match": 4
+      }
+    }
+  },
+  "answerable_correct": {
+    "questions": 579,
+    "turns": {
+      "1": 320,
+      "2": 160,
+      "4": 51,
+      "3": 48
+    },
+    "turns_gte_2": 259,
+    "actually_opened_additional_pages": 115,
+    "first_three_exact_order": 579,
+    "first_three_same_set": 579,
+    "text": {
+      "n": 579,
+      "minimum": 0.000396728515625,
+      "p10": 0.0223358154296875,
+      "p25": 0.1722412109375,
+      "median": 0.779296875,
+      "mean": 0.5991561548697516,
+      "p75": 0.9541015625,
+      "p90": 0.99228515625,
+      "maximum": 1.0
+    },
+    "text_at_least_0_99": 73,
+    "text_saturated_at_1": 3,
+    "visual": {
+      "n": 579,
+      "minimum": 9.586669921875,
+      "p10": 15.12998046875,
+      "p25": 17.6624755859375,
+      "median": 21.2900390625,
+      "mean": 22.75763877644646,
+      "p75": 25.83807373046875,
+      "p90": 32.669921875,
+      "maximum": 64.96240234375
+    },
+    "markers": {
+      "combined": {
+        "eligible": 373,
+        "no_marker": 206,
+        "any_match": 333,
+        "all_match": 265
+      },
+      "name_or_label": {
+        "eligible": 345,
+        "no_marker": 234,
+        "any_match": 288,
+        "all_match": 249
+      },
+      "year": {
+        "eligible": 116,
+        "no_marker": 463,
+        "any_match": 107,
+        "all_match": 107
+      },
+      "metric": {
+        "eligible": 32,
+        "no_marker": 547,
+        "any_match": 29,
+        "all_match": 24
+      }
+    }
+  },
+  "auc_higher_score_predicts_answerable_correct": {
+    "text_rerank_max": 0.6435252566416332,
+    "visual_maxsim_max": 0.5331742058178572
+  },
+  "method": {
+    "scores": "Local replay of frozen first-round chunk reranking and page MaxSim.",
+    "markers": "Rule-extracted title-case names, acronyms and quoted phrases; explicit 4-digit years; named metrics and listed aliases. Matched on the union of cited PDF page text, indexed text, structured tables and OCR. No generated image summaries.",
+    "turns": "Multi-turn means turns >= 2. New full-page openings are measured separately.",
+    "does_not_establish_support": true
+  }
+}

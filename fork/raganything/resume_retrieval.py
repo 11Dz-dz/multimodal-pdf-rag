@@ -18,6 +18,10 @@ import pymupdf
 from qdrant_client import QdrantClient, models as q
 from rank_bm25 import BM25Okapi
 
+from .rank_fusion import (
+    PAGE_FUSION_METHOD, PAGE_RRF_K, PAGE_TEXT_HEADS, PAGE_VISUAL_HEADS, PAGE_VISUAL_WEIGHT,
+    fuse_pages, page_heads, select_pages,
+)
 from .resume_multistep import (
     EVALUATION_REFERENCE, EXTRACT, METRIC, PLACEHOLDER, PLAN, entity_for_metric, grounded_fact,
     interleave_pages, needs_steps, plan_steps, source_text,
@@ -27,16 +31,16 @@ from .resume_references import (
     requested_references,
     scoped_evidence,
 )
-from .resume_review import READ, excerpt_sources, proposed_fact, quote_contains_answer, verified_sources, verifier_request
+from .resume_review import CITATION_RECHECK, visual_review_pages
 from .resume_tables import format_table_comparison, table_comparison, table_text
 from .utils import get_table_body, normalize_caption_list
+from .visual_index import VisualIndexError
 
 
-FUSION_LIMIT = 30
-RERANK_LIMIT = 12
-PAGE_RERANK_LIMIT = 24
+FUSION_LIMIT = 60
+RERANK_LIMIT = 24
 PAGE_CONTEXT_LIMIT = 4
-PAGE_WEIGHT = 0.20
+PAGE_WEIGHT = 0.05
 SEMANTIC_THRESHOLD = 0.97
 PRIORITY_PAGE_SCORE = 0.08
 CJK = re.compile(r'[\u3400-\u9fff]')
@@ -47,8 +51,13 @@ PAGE_ANSWER_PROMPT = (
     'check exact entities, units and time periods, and combine pages or calculate when needed. '
     'Give the shortest complete answer in the language and format requested. '
     'Return one JSON object, with no preamble: {"answer":"your answer","pages":[10,11]}. '
-    'For pages, copy the page numbers in the PDF Page labels that support your answer. '
-    'If the requested fact or a necessary operand is absent, return {"answer":null,"pages":[]}.\nQuestion: '
+    'For pages, use the integers in the "PDF Page N" source headings and ignore printed page numbers. '
+    'If a requested fact or necessary operand is absent, return '
+    '{"answer":null,"pages":[],"missing":"briefly name the missing section, figure, table or fact"}.\nQuestion: '
+)
+REFUSAL_PREFIX = re.compile(
+    r'^(?:证据不足|无法回答|未提及|未提供|无法确定|not answerable\b|insufficient evidence\b|'
+    r'cannot answer\b|not provided\b|not mentioned\b|cannot be determined\b)', re.I,
 )
 
 
@@ -71,15 +80,30 @@ def json_object(text):
 
 
 def evidence_ids(values, permitted):
+    if type(values) in {int, str}:
+        values = [values]
     if not isinstance(values, list):
         return []
     ids = []
     for value in values:
-        if isinstance(value, str) and re.fullmatch(r'[0-9]{1,3}', value):
-            value = int(value)
+        if isinstance(value, str):
+            numbers = re.findall(r'\d{1,3}', value)
+            if len(numbers) != 1:
+                continue
+            value = int(numbers[0])
         if type(value) is int and value in permitted and value not in ids:
             ids.append(value)
     return ids
+
+
+def page_response_answer(output):
+    value = output.get('answer')
+    if type(value) in {int, float}:
+        value = str(value)
+    if not isinstance(value, str):
+        return ''
+    answer = value.strip()
+    return '' if REFUSAL_PREFIX.match(answer) else answer
 
 
 def numeric_literals(text):
@@ -164,15 +188,18 @@ def parent_for(blocks, page, section, order):
     return min(options, key=priority)
 
 
-def fuse(dense, sparse, limit=FUSION_LIMIT):
+def fuse(dense, sparse, limit=FUSION_LIMIT, dense_floor=25):
     scores = defaultdict(float)
     for ranking in (dense, sparse):
         for rank, candidate in enumerate(ranking, 1):
             scores[candidate] += 1 / (60 + rank)
-    return sorted(scores.items(), key=lambda entry: entry[1], reverse=True)[:limit]
+    selected = dict(sorted(scores.items(), key=lambda entry: entry[1], reverse=True)[:limit])
+    for candidate in dense[:dense_floor]:
+        selected.setdefault(candidate, scores[candidate])
+    return list(selected.items())
 
 
-def group_pages(blocks):
+def group_pages(blocks, page_weight=PAGE_WEIGHT):
     groups = {}
     for block in sorted(blocks, key=lambda v: v['rerank_score'], reverse=True):
         page = groups.setdefault((block['doc_id'], block['page']), [])
@@ -182,7 +209,7 @@ def group_pages(blocks):
     for (document, number), matches in groups.items():
         score = matches[0]['rerank_score']
         if len(matches) > 1:
-            score += PAGE_WEIGHT * matches[1]['rerank_score']
+            score += page_weight * matches[1]['rerank_score']
         result.append({'doc_id': document, 'page': number, 'score': round(score, 6), 'blocks': matches})
     return sorted(result, key=lambda page: page['score'], reverse=True)
 
@@ -223,7 +250,9 @@ class SemanticCache:
 
 class ResumeRetriever:
     def __init__(self, *, items, directory, doc_id, filename, models, ocr_python, ocr_script,
-                 ocr_timeout=300, ocr_workers=1, review_on_refusal=False, answer_page_limit=PAGE_CONTEXT_LIMIT):
+                 ocr_timeout=300, ocr_workers=1, review_on_refusal=False, answer_page_limit=PAGE_CONTEXT_LIMIT,
+                 visual_index=None, visual_weight=PAGE_VISUAL_WEIGHT, visual_fusion=PAGE_FUSION_METHOD,
+                 visual_rrf_k=PAGE_RRF_K, visual_text_heads=PAGE_TEXT_HEADS, visual_heads=PAGE_VISUAL_HEADS):
         if answer_page_limit < 1:
             raise ValueError('answer_page_limit must be positive')
         self.items, self.directory = items, Path(directory)
@@ -233,13 +262,24 @@ class ResumeRetriever:
         self.ocr_workers = ocr_workers
         self.review_on_refusal = review_on_refusal
         self.answer_page_limit = answer_page_limit
+        self.visual_index = visual_index
+        self.visual_weight = visual_weight
+        self.visual_fusion = visual_fusion
+        self.visual_rrf_k = visual_rrf_k
+        self.visual_text_heads = visual_text_heads
+        self.visual_heads = visual_heads
         self.directory.mkdir(parents=True, exist_ok=True)
         self.vector_store = QdrantClient(path=str(self.directory / 'qdrant'))
         identity = getattr(models, 'answer_identity', getattr(models, 'answer_model', ''))
         model_key = hashlib.sha256(str(identity).encode()).hexdigest()[:12]
-        cache_version = 'v3' if review_on_refusal else 'v2'
+        cache_version = 'v5' if review_on_refusal else 'v4'
         if answer_page_limit != PAGE_CONTEXT_LIMIT:
             cache_version += f'-p{answer_page_limit}'
+        if visual_index is not None:
+            config = (visual_index.worker.identity, visual_weight, visual_fusion, visual_rrf_k,
+                      visual_text_heads, visual_heads)
+            visual_key = hashlib.sha256(json.dumps(config).encode()).hexdigest()[:12]
+            cache_version += f'-colqwen-{visual_key}'
         self.cache = SemanticCache(self.directory / f'grounded-answers-pages-{cache_version}-{model_key}.sqlite3')
         self.pdf_path = self.directory.parent / 'source.pdf'
         self.caption_targets = None
@@ -398,6 +438,9 @@ class ResumeRetriever:
             await self.upsert_blocks(self.blocks)
             self.write_manifest(manifest)
         await self.index_charts(manifest)
+        self.prepare_search()
+
+    def prepare_search(self):
         if not self.blocks:
             raise ValueError('没有可索引的正文、表格或图片')
         self.by_id = {block['id']: block for block in self.blocks}
@@ -429,7 +472,8 @@ class ResumeRetriever:
         reranked = [dict(self.by_id[candidate], rrf_score=round(rrf, 6), rerank_score=float(score))
                     for (candidate, rrf), score in zip(fused, scores)]
         reranked.sort(key=lambda block: block['rerank_score'], reverse=True)
-        reranked = reranked[:PAGE_RERANK_LIMIT if page_context else RERANK_LIMIT]
+        if not page_context:
+            reranked = reranked[:RERANK_LIMIT]
         pages = group_pages(reranked)
         trace = {'dense': [{'id': str(hit.id), 'page': self.by_id[str(hit.id)]['page'],
                             'score': float(hit.score)} for hit in dense],
@@ -557,7 +601,7 @@ class ResumeRetriever:
                  'table_method': block.get('table_method'), 'file_path': self.filename, 'page': page['page'],
                  'score': page['score']} for page in pages for block in page['blocks']]
 
-    def page_sources(self, pages, question, scoped):
+    def page_sources(self, pages, question, scoped, *, limit=None):
         by_page = defaultdict(list)
         for item in scoped:
             by_page[item['page']].append(item)
@@ -565,13 +609,14 @@ class ResumeRetriever:
         sources = []
         with pymupdf.open(self.pdf_path) as pdf:
             # Keep the IDs stable and preserve the PDF reading order for cross-page questions.
-            for candidate in sorted(pages[:self.answer_page_limit], key=lambda page: page['page']):
+            for candidate in sorted(pages[:self.answer_page_limit if limit is None else limit],
+                                    key=lambda page: page['page']):
                 number = candidate['page']
                 page = pdf[number - 1]
                 size = max(page.rect.width, page.rect.height)
                 scale = min(3, 1400 / size)
                 image = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale)).tobytes('jpeg', jpg_quality=88)
-                excerpts = [item['text'][:3300] for item in by_page[number]]
+                excerpts = [item['text'][:2000] for item in by_page[number]]
                 has_crop = bool(by_page[number] and by_page[number][0]['images'])
                 images = [image] + (by_page[number][0]['images'][:1] if has_crop else [])
                 for block in candidate['blocks'][:3]:
@@ -579,44 +624,69 @@ class ResumeRetriever:
                     if not content:
                         continue
                     lines = content.splitlines()
-                    if len(content) > 1800:
+                    if len(content) > 1000:
                         match = sorted(range(len(lines)), key=lambda i: len(set(terms(lines[i])) & keywords),
                                        reverse=True)[:8]
                         lines = [lines[i] for i in sorted({0, *match})]
-                    excerpts.append('\n'.join(lines)[:1800])
+                    excerpts.append('\n'.join(lines)[:1000])
                 native = page.get_text(sort=True).strip()
                 if not native:
                     native = '\n'.join(block['text'] for block in self.page_text[number])
-                if len(native) > 5000:
+                if len(native) > 2500:
                     lines = native.splitlines()
                     selected = sorted(range(len(lines)), key=lambda i: len(set(terms(lines[i])) & keywords),
                                       reverse=True)[:45]
                     nearby = {j for i in selected for j in range(max(0, i - 1), min(len(lines), i + 2))}
-                    native = '\n'.join(lines[i] for i in sorted(nearby))[:5000]
+                    native = '\n'.join(lines[i] for i in sorted(nearby))[:2500]
                 text = '\n\n'.join(part for part in (native, *excerpts) if part)
                 sources.append({'id': number, 'page': number, 'label': f'PDF Page {number}',
                                 'text': text, 'images': images})
         return sources
 
-    async def page_answer(self, question, vector):
-        pages, trace, retrieval_query = await self.search_question(question, vector, page_context=True)
+    async def rank_answer_pages(self, question, vector, *, translate=True):
+        if translate:
+            pages, trace, retrieval_query = await self.search_question(question, vector, page_context=True)
+        else:
+            pages, trace = await self.search(question, vector, page_context=True)
+            retrieval_query = question
+        protected = ()
+        if getattr(self, 'visual_index', None) is not None and self.visual_weight:
+            try:
+                visual_pages = await self.visual_index.search(question, top_k=24)
+            except (VisualIndexError, OSError) as exc:
+                LOG.warning('Visual retrieval unavailable for document %s: %s', self.doc_id, exc)
+                trace['visual_index_status'] = 'unavailable'
+            else:
+                trace['text_pages'] = trace['pages']
+                trace['visual_pages'] = visual_pages
+                trace['visual_index_status'] = 'ready'
+                protected = page_heads(pages, visual_pages, self.visual_text_heads, self.visual_heads)
+                pages = fuse_pages(pages, visual_pages, self.visual_weight, k=self.visual_rrf_k,
+                                   method=self.visual_fusion)
+        return await self.select_answer_pages(question, pages, trace, retrieval_query, protected=protected)
+
+    async def select_answer_pages(self, question, pages, trace, retrieval_query, *, protected=()):
         references = requested_references(question)
         scoped = []
+        matches = []
         if references:
             matches, reference_trace, scoped = await asyncio.to_thread(self.referenced_evidence, references, True)
             trace['references'] = reference_trace['references']
             trace['unresolved_references'] = reference_trace['unresolved_references']
-            if scoped:
-                pages = interleave_pages([matches, pages])
-        anchors = requested_pages(question)
+        with pymupdf.open(self.pdf_path) as pdf:
+            page_count = pdf.page_count
+        limit = self.answer_page_limit
+        anchors = requested_pages(question, page_count=page_count)[:limit]
         if anchors:
-            with pymupdf.open(self.pdf_path) as pdf:
-                anchors = [number for number in anchors if 1 <= number <= pdf.page_count][:self.answer_page_limit]
-            ranked = {page['page']: page for page in pages}
-            forced = [ranked.get(number, {'page': number, 'score': 0.0, 'blocks': []}) for number in anchors]
-            pages = forced + [page for page in pages if page['page'] not in anchors]
             trace['requested_pages'] = anchors
+        pages = select_pages(pages, limit=limit, page_count=page_count, anchors=anchors,
+                             references=matches if scoped else (), protected=protected)
         trace['pages'] = [{'page': page['page'], 'score': page['score'], 'blocks': len(page['blocks'])} for page in pages]
+        return pages, trace, retrieval_query, scoped
+
+    async def page_answer(self, question, vector):
+        pages, trace, retrieval_query, scoped = await self.rank_answer_pages(question, vector)
+        references = requested_references(question)
         sources = await asyncio.to_thread(self.page_sources, pages, retrieval_query, scoped)
         answer, ids = None, []
         if len(scoped) == 1:
@@ -647,21 +717,20 @@ class ResumeRetriever:
                 trace['answer_method'] = 'table_cells'
         images_seen = 0
         answer_pages = []
+        output = {}
         if not ids and sources:
-            raw = await self.generate(PAGE_ANSWER_PROMPT + question, sources, 220)
+            raw = await self.generate(PAGE_ANSWER_PROMPT + question, sources, 400)
             answer_pages = [source['page'] for source in sources]
             output = json_object(raw)
-            answer = output.get('answer')
-            if type(answer) in {int, float}:
-                answer = str(answer)
+            answer = page_response_answer(output)
             ids = evidence_ids(output.get('pages'), {source['id'] for source in sources})
             if isinstance(answer, str) and answer.strip() and not ids:
                 trace['citation_check'] = '模型未返回有效的原始 PDF 页码'
             images_seen = sum(len(source['images']) for source in sources)
-        refused = not ids or not isinstance(answer, str) or not answer.strip()
-        if not refused and re.match(r'^(?:证据不足|无法回答|not answerable\b|insufficient evidence\b|cannot answer\b)',
-                                    answer.strip(), re.I):
-            refused = True
+        refused = not ids or not answer
+        missing = output.get('missing')
+        if refused and isinstance(missing, str) and missing.strip():
+            trace['missing_hint'] = missing.strip()[:200]
         citations = [] if refused else [
             {'page': page, 'file_path': self.filename, 'doc_id': self.doc_id} for page in ids
         ]
@@ -676,49 +745,57 @@ class ResumeRetriever:
             result['_unverified_candidate'] = answer.strip()
         return result
 
-    async def review_refusal(self, question, result, candidate=None, *, require_extractive=True):
-        """Read focused snippets again, then cite verified quotations if the question is answerable."""
+    async def review_refusal(self, question, result, candidate=None):
+        """Recheck citations against prior images, or read a bounded set of new pages."""
         if not result['refused']:
             return result
         trace = dict(result['trace'])
         query = trace.get('translated_query', question)
-        keywords = set(terms(query))
-        weights = {token: max(0.5, self.bm25.idf.get(token, 0.5)) for token in keywords}
+        previous = trace.get('answer_pages', trace.get('verification_pages', []))
+        extra_pages = []
+        scoped = []
         if candidate:
-            for token in set(terms(candidate)) - keywords:
-                weights[token] = min(1.0, max(0.5, self.bm25.idf.get(token, 0.5)))
-            keywords = set(weights)
-        sources = await asyncio.to_thread(excerpt_sources, self.pdf_path, trace, self.page_blocks,
-                                          keywords, weights, terms)
-        review = {'pages': [item['page'] for item in sources], 'outcome': 'no_text',
-                  'rechecked_candidate': bool(candidate)}
-        trace['review'] = review
-        trace['verification_pages'] = list(dict.fromkeys(trace['verification_pages'] + review['pages']))
-        result = dict(result, trace=trace)
-        if not sources:
-            return result
-        if candidate:
-            answer, selected = proposed_fact({'answer': candidate}, sources)
+            selected = previous[:self.answer_page_limit]
+            references = requested_references(question)
+            if references:
+                _, _, scoped = await asyncio.to_thread(self.referenced_evidence, references, True)
+            prompt = CITATION_RECHECK + json.dumps({'question': question, 'candidate': candidate}, ensure_ascii=False)
         else:
-            raw = await self.generate(READ + question, sources, 220)
-            answer, selected = proposed_fact(json_object(raw), sources)
-        if not answer:
-            review['outcome'] = 'no_answer'
+            if missing := trace.get('missing_hint'):
+                query = f'{question} {missing}'
+                vector = (await self.models.embed([query]))[0]
+                extra_pages, _, query = await self.search_question(query, vector, page_context=True)
+            with pymupdf.open(self.pdf_path) as pdf:
+                selected = visual_review_pages(trace, pdf.page_count, extra_pages, limit=self.answer_page_limit)
+            prompt = PAGE_ANSWER_PROMPT + question
+        review = {'pages': [], 'outcome': 'no_pages', 'rechecked_candidate': bool(candidate)}
+        trace['review'] = review
+        if not selected:
+            return dict(result, trace=trace)
+        blocks_by_page = defaultdict(list)
+        for row in trace.get('reranked', []):
+            if block := self.by_id.get(row['id']):
+                blocks_by_page[block['page']].append(block)
+        pages = {page['page']: page for page in extra_pages}
+        candidates = [pages.get(number, {'page': number, 'blocks': blocks_by_page[number]}) for number in selected]
+        sources = await asyncio.to_thread(self.page_sources, candidates, query, scoped)
+        if not sources:
+            return dict(result, trace=trace)
+        output = json_object(await self.generate(prompt, sources, 400))
+        answer = page_response_answer(output)
+        ids = evidence_ids(output.get('pages'), {source['id'] for source in sources})
+        review_pages = [source['page'] for source in sources]
+        review.update(pages=review_pages, outcome='no_answer' if not answer else 'invalid_citations')
+        trace['verification_pages'] = list(dict.fromkeys(trace.get('verification_pages', []) + review_pages))
+        images_seen = result['images_seen_by_model'] + sum(len(source['images']) for source in sources)
+        result = dict(result, trace=trace, images_seen_by_model=images_seen)
+        if not answer or not ids:
             return result
-        verdict = await self.models.complete(verifier_request(question, answer, selected), 240)
-        supported = verified_sources(json_object(verdict), selected)
-        review.update(outcome='unsupported', proposed_quote_pages=[item['page'] for item in selected])
-        if not supported or not numeric_literals(answer) <= numeric_literals(' '.join(supported.values())):
-            return result
-        if require_extractive and not quote_contains_answer(question, answer, supported.values()):
-            review['outcome'] = 'answer_not_in_quotes'
-            return result
-        pages = list(supported)
-        review.update(outcome='supported', quotes=supported)
-        trace.update(verification_mode='page_review', sufficiency={'supported': True, 'pages': pages, 'missing': []})
+        review['outcome'] = 'supported'
+        trace.update(verification_mode='visual_page_review', sufficiency={'supported': True, 'pages': ids, 'missing': []})
         trace.pop('citation_check', None)
         return dict(result, answer=answer, refused=False,
-                    citations=[{'page': page, 'file_path': self.filename, 'doc_id': self.doc_id} for page in pages])
+                    citations=[{'page': page, 'file_path': self.filename, 'doc_id': self.doc_id} for page in ids])
 
     async def step_evidence(self, query, visual, entity):
         references = requested_references(query)
@@ -822,7 +899,7 @@ class ResumeRetriever:
             candidate = result.pop('_unverified_candidate', None)
             if result['refused'] and self.review_on_refusal:
                 result = await self.review_refusal(question, result, candidate=candidate)
-            if use_cache and not result['refused']:
+            if use_cache and not result['refused'] and result['trace'].get('visual_index_status') != 'unavailable':
                 self.cache.put(question, vector, result)
             return result
         references = requested_references(question)

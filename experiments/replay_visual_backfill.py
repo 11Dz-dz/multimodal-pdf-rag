@@ -12,16 +12,18 @@ from pathlib import Path
 from answer_relay import AnswerAPIError, AnswerRelay
 from demo import DEFAULT_MODELS, LocalModels, resolve_mineru_items
 from dotenv import dotenv_values
+import pymupdf
+from qdrant_client import QdrantClient
 from .judge import judge
+from raganything.resume_references import requested_references
 from raganything.resume_retrieval import (
     PAGE_ANSWER_PROMPT,
     ResumeRetriever,
     evidence_ids,
     group_pages,
     json_object,
-    terms,
 )
-from rank_bm25 import BM25Okapi
+from raganything.resume_review import visual_review_pages
 
 
 def indexed_rows(path, field):
@@ -76,7 +78,7 @@ def holdout_cases(rows, pilot):
 
 
 class ReadOnlyReplay(ResumeRetriever):
-    def __init__(self, directory, case, models):
+    def __init__(self, directory, case, models, *, rerun_ranking=False):
         self.doc_id = case['document_id'].replace('-', '')
         self.pdf_path = directory / 'source.pdf'
         self.models = models
@@ -84,22 +86,41 @@ class ReadOnlyReplay(ResumeRetriever):
         meta = json.loads((directory / 'document.json').read_text(encoding='utf-8'))
         self.filename = meta['filename']
         self.items = resolve_mineru_items(directory / meta['content_list'], include_charts=True)
-        self.blocks = json.loads((directory / 'resume-index-v1/chunks.json').read_text(encoding='utf-8'))
-        self.page_text, self.page_blocks = defaultdict(list), defaultdict(list)
+        index = directory / 'resume-index-v1'
+        self.blocks = json.loads((index / 'chunks.json').read_text(encoding='utf-8'))
         self.caption_targets = None
-        for block in self.blocks:
-            self.page_blocks[block['page']].append(block)
-            if block['kind'] == 'text':
-                self.page_text[block['page']].append(block)
-        self.bm25 = BM25Okapi([terms(self.index_text(block)) or ['_'] for block in self.blocks])
+        self.prepare_search()
         self.original = case['result']['trace']
-        by_id = {block['id']: block for block in self.blocks}
-        self.ranked_pages = group_pages([dict(by_id[hit['id']], rerank_score=hit['score'])
-                                         for hit in self.original['reranked']])
+        self.rerun_ranking = rerun_ranking
+        self.vector_store = QdrantClient(path=str(index / 'qdrant'), force_disable_check_same_thread=True) if rerun_ranking else None
+        self.ranked_pages = group_pages([dict(self.by_id[hit['id']], rerank_score=hit['score'])
+                                         for hit in self.original['reranked']], page_weight=0.20)
+
+    async def close(self):
+        if self.vector_store is not None:
+            await super().close()
 
     async def search_question(self, question, vector, page_context=False):
+        if self.rerun_ranking:
+            if vector is None:
+                vector = (await self.models.embed([question]))[0]
+            return await super().search_question(question, vector, page_context=page_context)
         trace = {key: self.original[key] for key in ('dense', 'bm25', 'rrf', 'reranked')}
         return self.ranked_pages, trace, question
+
+    async def rank_answer_pages(self, question, vector):
+        if self.rerun_ranking:
+            pages, trace, query, scoped = await super().rank_answer_pages(question, vector)
+            self.ranked_pages = pages
+            return pages, trace, query, scoped
+        by_page = {item['page']: item for item in self.ranked_pages}
+        pages = [dict(row, blocks=by_page.get(row['page'], {}).get('blocks', [])) for row in self.original['pages']]
+        trace = {key: self.original[key] for key in ('dense', 'bm25', 'rrf', 'reranked', 'pages', 'requested_pages',
+                                                     'references', 'unresolved_references') if key in self.original}
+        scoped = []
+        if trace.get('references') and not trace.get('unresolved_references'):
+            _, _, scoped = await asyncio.to_thread(self.referenced_evidence, requested_references(question), True)
+        return pages, trace, question, scoped
 
     async def answer_with_backfill(self, question, baseline, *, verify=False):
         if not baseline['refused']:
@@ -113,9 +134,12 @@ class ReadOnlyReplay(ResumeRetriever):
         ordered = [by_page.get(page, {'page': page, 'blocks': []}) for page in ranks[:12]]
         earlier = await asyncio.to_thread(self.page_sources, ordered[:8], question, [])
         later = await asyncio.to_thread(self.page_sources, ordered[8:12], question, [])
-        text_context = [dict(item, images=[], text=item['text'][:2400]) for item in earlier]
-        # Keep the retry image count bounded while retaining preceding context in text.
-        prompt = ('The earlier pages are included as text. The additional pages include screenshots. '
+        with pymupdf.open(self.pdf_path) as pdf:
+            selected = visual_review_pages(trace, pdf.page_count, extra_pages=extra, limit=6)
+        retained = set(selected).intersection(trace['answer_pages'])
+        text_context = [dict(item, images=item['images'][:1] if item['page'] in retained else [],
+                             text=item['text'][:2400]) for item in earlier]
+        prompt = ('Earlier pages include text and up to two screenshots. The additional pages include screenshots. '
                   'Answer only if the additional pages provide at least one necessary supporting fact. '
                   'Cite an additional page and any earlier page needed for the answer.\n')
         raw = await self.generate(prompt + PAGE_ANSWER_PROMPT + question, text_context + later, 220)
@@ -142,8 +166,8 @@ class ReadOnlyReplay(ResumeRetriever):
         return baseline, extra, diagnostic
 
 
-async def evaluate_case(group, case, relay, site, semaphore, verify):
-    async with semaphore:
+async def evaluate_case(group, case, relay, site, semaphore, verify, ranking_models, rerun_ranking, document_locks):
+    async with semaphore, document_locks[case['document_id']]:
         result = {'id': case['id'], 'group': group}
         directory = site / 'uploads' / case['document_id'].replace('-', '')
         models = type('RelayModel', (), {})()
@@ -158,19 +182,19 @@ async def evaluate_case(group, case, relay, site, semaphore, verify):
                     await asyncio.sleep(1)
 
         models.complete = complete
+        models.embed = ranking_models.embed
+        models.rerank = ranking_models.rerank
+        replay = None
         try:
-            replay = await asyncio.to_thread(ReadOnlyReplay, directory, case, models)
+            replay = await asyncio.to_thread(ReadOnlyReplay, directory, case, models, rerun_ranking=rerun_ranking)
             start = time.monotonic()
             phase = 'eight_page_answer'
             baseline = await replay.page_answer(case['question'], None)
             old_pages = [page['page'] for page in case['result']['trace']['pages']]
             new_pages = [page['page'] for page in baseline['trace']['pages']]
-            if old_pages[:12] != new_pages[:12]:
+            if not rerun_ranking and old_pages[:12] != new_pages[:12]:
                 raise ValueError('Replayed ranking differs from the frozen first twelve pages')
-            candidate = baseline.pop('_unverified_candidate', None)
-            if baseline['refused']:
-                phase = 'text_review'
-                baseline = await replay.review_refusal(case['question'], baseline, candidate=candidate)
+            baseline.pop('_unverified_candidate', None)
             result.update(baseline=baseline, baseline_seconds=round(time.monotonic() - start, 3))
             start = time.monotonic()
             phase = 'visual_backfill'
@@ -178,6 +202,9 @@ async def evaluate_case(group, case, relay, site, semaphore, verify):
             result.update(trial=trial, extra_pages=pages, extra_seconds=round(time.monotonic() - start, 3), **diagnostic)
         except AnswerAPIError as error:
             result.update(http_error=error.status, http_phase=phase)
+        finally:
+            if replay is not None:
+                await replay.close()
         return case, result
 
 
@@ -204,7 +231,9 @@ async def run(args):
                         compact_images=True, timeout=args.timeout)
     models = LocalModels(args.models, args.device)
     semaphore = asyncio.Semaphore(args.concurrency)
-    tasks = [asyncio.create_task(evaluate_case(group, case, relay, args.site, semaphore, args.verify))
+    document_locks = defaultdict(asyncio.Lock)
+    tasks = [asyncio.create_task(evaluate_case(group, case, relay, args.site, semaphore, args.verify,
+                                               models, args.rerun_ranking, document_locks))
              for group, case in cases]
     summaries, traces, extra_times = defaultdict(Counter), [], []
     for task in asyncio.as_completed(tasks):
@@ -266,4 +295,6 @@ if __name__ == '__main__':
     parser.add_argument('--prior-trial', type=Path, help='Prior paired report used to prioritize its wrong answers')
     parser.add_argument('--previous-errors-only', action='store_true')
     parser.add_argument('--holdout', action='store_true', help='Use a seeded sample of questions outside the pilot')
+    parser.add_argument('--rerun-ranking', action='store_true',
+                        help='Repeat retrieval with the current search instead of using the archived page ranking')
     asyncio.run(run(parser.parse_args()))

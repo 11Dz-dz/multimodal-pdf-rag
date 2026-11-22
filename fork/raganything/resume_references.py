@@ -19,6 +19,9 @@ PAGE_REFERENCE = re.compile(
     r'(?<!\w)(?:PDF\s+)?pages?\s+(\d+)(?:\s*(?:and|to|[-–])\s*(\d+))?(?!\w|\.\d)'
     r'|(?:PDF\s*)?第\s*(\d+)\s*页', re.I,
 )
+FRONT_PAGE = re.compile(r'\b(?:cover|title\s+page|first\s+page|front\s+page|logo)\b|封面|首页|标志', re.I)
+CONTENTS_PAGE = re.compile(r'\b(?:table\s+of\s+contents|contents\s+page)\b|目录', re.I)
+BACK_PAGE = re.compile(r'\b(?:back\s+cover|last\s+page|final\s+page)\b|封底|最后一页', re.I)
 
 
 def reference_key(match):
@@ -31,9 +34,10 @@ def requested_references(question):
     return list(dict.fromkeys(reference_key(match) for match in REFERENCE.finditer(query)))
 
 
-def requested_pages(question):
+def requested_pages(question, page_count=None):
+    query = unicodedata.normalize('NFKC', question)
     pages = {}
-    for match in PAGE_REFERENCE.finditer(unicodedata.normalize('NFKC', question)):
+    for match in PAGE_REFERENCE.finditer(query):
         start, end, chinese = match.groups()
         first = int(start or chinese)
         pages[first] = None
@@ -42,6 +46,14 @@ def requested_pages(question):
                 pages[int(end)] = None
             elif 0 < int(end) - first <= 3:
                 pages.update(dict.fromkeys(range(first + 1, int(end) + 1)))
+    if FRONT_PAGE.search(query):
+        pages[1] = None
+    if CONTENTS_PAGE.search(query):
+        pages.update(dict.fromkeys((1, 2, 3)))
+    if page_count is not None:
+        if BACK_PAGE.search(query):
+            pages[page_count] = None
+        return [page for page in pages if 1 <= page <= page_count]
     return list(pages)
 
 

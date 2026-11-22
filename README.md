@@ -26,6 +26,23 @@ python3 -m venv .ocr-venv
 使用兼容 API 作答时，将 `.env.example` 复制为 `.env` 并填入自己的配置，启动时附加 `--answer-env-file .env`。该模式会将候选页图像和证据文字发给配置的服务。
 视觉问答首轮默认发送最多 8 张证据页图。可用 `--answer-page-limit 4` 调整页数上限。使用 API 中转时，可加 `--answer-compact-images` 压缩页图。评估接口在 `trace.answer_pages` 返回本次首轮作答发送的 PDF 页码。
 
+## 原生视觉页检索与三工具 Agent
+
+将视觉模型放在独立环境中，复用现有文本索引。为视觉环境安装适合设备的 PyTorch 和 torchvision 后运行：
+
+```bash
+python3 -m venv .visual-venv
+.visual-venv/bin/python -m pip install -r requirements-visual.txt
+
+.venv/bin/python serve.py --models ./models \
+  --answer-env-file .env --answer-compact-images \
+  --visual-python .visual-venv/bin/python --visual-device cuda:0 --qa-mode agent
+```
+
+ColQwen2.5 读取整页图像，生成同页多向量并用 MaxSim 检索。文本候选和视觉页候选在页级归一化融合，默认保留文本前 2 和视觉前 3 中可用的候选。上传时新增 `colqwen25-pages.pt`，已入库的 PDF 可在首次检索时构建视觉索引。
+
+Agent 首轮读取检索排名前 3 页和候选摘要，按需搜索、打开整页或裁剪原页。总共最多 4 轮，第 4 轮关闭工具，答案引用已打开的 PDF 页。未启用 Agent 时使用默认静态作答。
+
 ## 评测
 
 `evaluate.py` 接收一个 JSON 数组，每题包含 `question` 和 `pages`，页码从 1 开始，空数组表示无答案。先上传 PDF，从接口结果取得文档 ID 再执行。

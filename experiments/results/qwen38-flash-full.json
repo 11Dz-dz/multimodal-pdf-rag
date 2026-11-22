@@ -1,0 +1,206 @@
+{
+  "run_config": {
+    "dataset": "MMLongBench-Doc",
+    "dataset_sha256": "c102cb76bcb147d631799940ae9abb1f817168b7224c80f78407e365d913055a",
+    "cases": 1071,
+    "pdfs": 134,
+    "selection": "all cases, fresh run",
+    "scope": "known PDF per question",
+    "answer_model": "qwen3.8-flash",
+    "provider": "bailian",
+    "enable_thinking": true,
+    "compact_images": true,
+    "timeout_seconds": 75,
+    "concurrency": 6,
+    "retrieval": {
+      "dense": "BGE-M3",
+      "sparse": "BM25",
+      "reranker": "BGE-reranker-v2-m3",
+      "visual": "ColQwen2.5-v0.2",
+      "visual_snapshot": "dcbe8d9cede518bce830488364ba0e40c873645b",
+      "fusion": "minmax",
+      "visual_weight": 0.8,
+      "text_heads": 2,
+      "visual_heads": 3
+    },
+    "agent": {
+      "max_turns": 4,
+      "initial_pages": 3,
+      "max_new_images": 10,
+      "max_tool_calls_per_turn": 3,
+      "tools": [
+        "search_pages",
+        "open_pages",
+        "crop_region"
+      ]
+    },
+    "judge": "benchmark reference with normalized exact match or local Qwen2.5-VL",
+    "source_sha256": {
+      "answer_relay.py": "04e59a3b533267f299bf3b05d67dfa9cb70755c122a06472527d833d8814a7c2",
+      "eval_agent_qa.py": "40adbfb8cbbc334cb6fe0564b13844135c27d0fa93cc89a6463d93b6d9b98517",
+      "experiments/judge.py": "95465a6fcc8179a1f5797daa9eea820f05b0156103f2d083426599e7d131e878",
+      "experiments/replay_visual_backfill.py": "147b1473f738a7f881d844e63ae93b183ed7a9a90d2d8eaa274f9c26e535a338",
+      "fork/raganything/agent_qa.py": "c54b345ac35097ec53f3129c48c7b445b715a00669cd77faf7b70b4923c12576",
+      "fork/raganything/rank_fusion.py": "2367de1a766aac9c707caa90bcbaceaaba571a239800f0772d3e59bdb11081c9",
+      "fork/raganything/visual_index.py": "7e3d66f1465dadbd78a243b9bb26ff574c126fa0c80494c6896f267ad55ef8e0",
+      "fork/raganything/resume_retrieval.py": "5f099b8f651c86a133dee9d4f3ef0a2e4abfc68a24005b560d0ade6e6cf3b04f",
+      "demo.py": "4d72ed89a7470c403a7b83bfee33809eea31bab19c5cfdd6c567bb37d0164034"
+    }
+  },
+  "summary": {
+    "mode": "agent",
+    "model": "qwen3.8-flash",
+    "sample_documents": 134,
+    "groups": {
+      "all": {
+        "total": 1071,
+        "verdicts": {
+          "wrong": 332,
+          "correct": 698,
+          "false_refusal": 37,
+          "api_error": 4
+        },
+        "correct": 698,
+        "refused": 142,
+        "first_round_complete": 546,
+        "evidence_complete": 664,
+        "mean_seconds": 19.29099480144661,
+        "median_seconds": 12.542499465984292,
+        "mean_turns": 2.0309278350515463,
+        "mean_images": 4.088097469540768,
+        "one_turn": 476,
+        "evidence_eligible": 842,
+        "evidence_scored": 838
+      },
+      "answerable": {
+        "total": 863,
+        "verdicts": {
+          "wrong": 243,
+          "correct": 579,
+          "false_refusal": 37,
+          "api_error": 4
+        },
+        "correct": 579,
+        "refused": 37,
+        "first_round_complete": 546,
+        "evidence_complete": 664,
+        "mean_seconds": 17.305124915408026,
+        "median_seconds": 10.941723164985888,
+        "mean_turns": 1.8870779976717114,
+        "mean_images": 4.060535506402794,
+        "one_turn": 422,
+        "evidence_eligible": 842,
+        "evidence_scored": 838
+      },
+      "single_page": {
+        "total": 490,
+        "verdicts": {
+          "wrong": 117,
+          "correct": 360,
+          "false_refusal": 11,
+          "api_error": 2
+        },
+        "correct": 360,
+        "refused": 11,
+        "first_round_complete": 405,
+        "evidence_complete": 439,
+        "mean_seconds": 14.597092962496747,
+        "median_seconds": 8.271820774010848,
+        "mean_turns": 1.6495901639344261,
+        "mean_images": 3.682377049180328,
+        "one_turn": 291,
+        "evidence_eligible": 485,
+        "evidence_scored": 483
+      },
+      "cross_page": {
+        "total": 361,
+        "verdicts": {
+          "correct": 214,
+          "wrong": 120,
+          "false_refusal": 25,
+          "api_error": 2
+        },
+        "correct": 214,
+        "refused": 25,
+        "first_round_complete": 141,
+        "evidence_complete": 225,
+        "mean_seconds": 21.0024275447801,
+        "median_seconds": 15.406480690988246,
+        "mean_turns": 2.1922005571030643,
+        "mean_images": 4.554317548746518,
+        "one_turn": 126,
+        "evidence_eligible": 357,
+        "evidence_scored": 355
+      },
+      "unanswerable": {
+        "total": 208,
+        "verdicts": {
+          "correct": 119,
+          "wrong": 89
+        },
+        "correct": 119,
+        "refused": 105,
+        "first_round_complete": 0,
+        "evidence_complete": 0,
+        "mean_seconds": 27.49225553273097,
+        "median_seconds": 18.22905201651156,
+        "mean_turns": 2.625,
+        "mean_images": 4.201923076923077,
+        "one_turn": 54,
+        "evidence_eligible": 0,
+        "evidence_scored": 0
+      },
+      "evidence_unannotated": {
+        "total": 12,
+        "verdicts": {
+          "wrong": 6,
+          "correct": 5,
+          "false_refusal": 1
+        },
+        "correct": 5,
+        "refused": 1,
+        "first_round_complete": 0,
+        "evidence_complete": 0,
+        "mean_seconds": 16.820787338418693,
+        "median_seconds": 16.521318617014913,
+        "mean_turns": 2.4166666666666665,
+        "mean_images": 4.666666666666667,
+        "one_turn": 5,
+        "evidence_eligible": 0,
+        "evidence_scored": 0
+      }
+    },
+    "provider": "bailian",
+    "enable_thinking": true,
+    "output_statuses": {
+      "refused": 106,
+      "answered": 925,
+      "invalid_citation": 21,
+      "invalid_output": 15
+    }
+  },
+  "attempted_cases": 1071,
+  "scored_cases": 1067,
+  "correct_over_all": 0.6517273576097106,
+  "correct_over_scored": 0.6541705716963448,
+  "explicit_refusal_rate_for_unanswerable": 0.5048076923076923,
+  "p95_seconds_scored_cases": 55.33816980451229,
+  "blocked_cases": [
+    {
+      "category": "cross_page",
+      "provider_error": "data_inspection_failed"
+    },
+    {
+      "category": "single_page",
+      "provider_error": "data_inspection_failed"
+    },
+    {
+      "category": "single_page",
+      "provider_error": "data_inspection_failed"
+    },
+    {
+      "category": "cross_page",
+      "provider_error": "data_inspection_failed"
+    }
+  ]
+}

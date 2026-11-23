@@ -1,10 +1,13 @@
 .env*
+*.env
 !.env.example
 .venv/
 .mineru-venv/
 .ocr-venv/
+.visual-venv/
 __pycache__/
 models/
+model-cache/
 runtime*/
 data/
 uploads/
@@ -13,5 +16,3 @@ uploads/
 *.zip
 *.db
 *.sqlite*
-
-.visual-venv/

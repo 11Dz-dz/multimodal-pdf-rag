@@ -1,58 +1,74 @@
-# 多模态检索
+# 多模态 PDF 检索与问答
 
-基于 [RAG-Anything 1.4.4](https://github.com/HKUDS/RAG-Anything/tree/019d6fdcfe635ed66fc096e4cf23376389e9de21) 的 PDF 问答 Demo。上传 PDF 后，系统解析正文、图片和表格，通过 BGE-M3 和 BM25 召回候选块，经 RRF 融合和重排后选取证据页，生成带页码引用的答案。
+上传 PDF 后，可查询正文、图表和页面布局信息。系统结合文本检索与原生页图检索，Agent 按需翻页和放大图表，返回带 PDF 页码引用的答案。
+
+## 定版结果
+
+评测对应改提示词前的三工具 Agent（[提交 `5ad549e`](https://github.com/11Dz-dz/multimodal-pdf-rag/commit/5ad549ee95bb8eaa609df96e55cb578a765b0fec)）。作答使用百炼 `qwen3.8-flash` 开思考。以下结果基于 MMLongBench-Doc。
+
+| 场景 | 指标 | 结果 |
+| --- | --- | ---: |
+| 已知目标 PDF | 页级 Hit@5 / Recall@5 / MRR@5 | 90.62% / 82.02% / 0.7709 |
+| 已知目标 PDF | Top-8 全证据页覆盖率 | **81.71%（688/842）** |
+| 已知目标 PDF | 端到端问答正确率 | **73.30%（785/1,071）** |
+| 135 份 PDF 全库检索 | 文档 Hit@1 / Hit@5 | 74.62% / 83.31% |
+
+73.30% 来自对原始答案的统一重判。完整指标、延迟和复现条件见 [实验与评测](experiments/README.md) 和 [定版指标 JSON](experiments/results/main-5ad549e-metrics.json)。
+
+## 上传和问答流程
+
+1. **入库**。MinerU 解析 PDF，PaddleOCR 补充图表文字。正文、表格和图片保留页码与上下文关系，文本和页图分别建立索引。
+2. **检索**。BGE-M3 与 BM25 召回候选块，经 BGE-Reranker 重排并聚合到页。ColQwen2.5 编码整页图像并用 MaxSim 打分。文本页与视觉页使用 Min-Max 归一化融合。
+3. **作答**。Agent 先读前 3 个候选页及后续候选摘要，可以继续搜索页、打开整页或裁剪局部。最多 4 轮，最后一轮输出答案和已读证据页码。
+
+Web Demo 在用户选中的 PDF 内问答。全库文档路由由 [单独的检索脚本](experiments/retrieve_mmlongbench_corpus.py) 运行。
 
 ## 在 Linux 上运行
 
-准备 Python 3.10+ 和适合设备的 PyTorch。将 BGE-M3、Qwen2.5-VL-3B-Instruct、BGE-Reranker-v2-m3 权重分别放在 `models/bge-m3`、`models/qwen-vl` 和 `models/reranker`。
+准备 Python 3.10+，并按机器的设备和 CUDA 配置，在 `.venv`、`.mineru-venv` 和 `.visual-venv` 中分别安装匹配的 PyTorch 和 torchvision。模型目录使用以下结构。
+
+| 本地目录 | 模型权重 |
+| --- | --- |
+| `models/bge-m3` | `BAAI/bge-m3` |
+| `models/reranker` | `BAAI/bge-reranker-v2-m3` |
+| `models/qwen-vl` | `Qwen/Qwen2.5-VL-3B-Instruct` |
 
 ```bash
 python3 -m venv .venv
-# 在 .venv 中安装适合设备的 PyTorch 和 torchvision。
-.venv/bin/pip install -r requirements.txt
-
 python3 -m venv .mineru-venv
-# 在 .mineru-venv 中另行安装适合设备的 PyTorch 和 torchvision。
-.mineru-venv/bin/pip install 'mineru[pipeline]==3.4.1' 'numpy<2' 'opencv-python==4.11.0.86'
-
 python3 -m venv .ocr-venv
-.ocr-venv/bin/pip install 'paddlepaddle==3.2.0' 'paddleocr==3.3.1' 'numpy<2'
-
-.venv/bin/python serve.py --models ./models
-```
-
-访问 <http://127.0.0.1:8094> 上传 PDF。用 `--backend baseline` 启动上游检索链路，用 `--review-on-refusal` 启用拒答后的证据补读。
-
-使用兼容 API 作答时，将 `.env.example` 复制为 `.env` 并填入自己的配置，启动时附加 `--answer-env-file .env`。该模式会将候选页图像和证据文字发给配置的服务。
-视觉问答首轮默认发送最多 8 张证据页图。可用 `--answer-page-limit 4` 调整页数上限。使用 API 中转时，可加 `--answer-compact-images` 压缩页图。评估接口在 `trace.answer_pages` 返回本次首轮作答发送的 PDF 页码。
-
-## 原生视觉页检索与三工具 Agent
-
-将视觉模型放在独立环境中，复用现有文本索引。为视觉环境安装适合设备的 PyTorch 和 torchvision 后运行：
-
-```bash
 python3 -m venv .visual-venv
-.visual-venv/bin/python -m pip install -r requirements-visual.txt
 
-.venv/bin/python serve.py --models ./models \
-  --answer-env-file .env --answer-compact-images \
-  --visual-python .visual-venv/bin/python --visual-device cuda:0 --qa-mode agent
+# 先在对应环境安装 PyTorch 和 torchvision，再安装下列依赖。
+.venv/bin/python -m pip install -r requirements.txt
+.mineru-venv/bin/python -m pip install 'mineru[pipeline]==3.4.1' 'numpy<2' 'opencv-python==4.11.0.86'
+.ocr-venv/bin/python -m pip install 'paddlepaddle==3.2.0' 'paddleocr==3.3.1' 'numpy<2'
+.visual-venv/bin/python -m pip install -r requirements-visual.txt
 ```
 
-ColQwen2.5 读取整页图像，生成同页多向量并用 MaxSim 检索。文本候选和视觉页候选在页级归一化融合，默认保留文本前 2 和视觉前 3 中可用的候选。上传时新增 `colqwen25-pages.pt`，已入库的 PDF 可在首次检索时构建视觉索引。
-
-Agent 首轮读取检索排名前 3 页和候选摘要，按需搜索、打开整页或裁剪原页。总共最多 4 轮，第 4 轮关闭工具，答案引用已打开的 PDF 页。未启用 Agent 时使用默认静态作答。
-
-## 评测
-
-`evaluate.py` 接收一个 JSON 数组，每题包含 `question` 和 `pages`，页码从 1 开始，空数组表示无答案。先上传 PDF，从接口结果取得文档 ID 再执行。
+将 `.env.example` 复制为 `.env`，在文件中配置支持图片和工具调用的 HTTPS 模型网关。网关会接收问题和用于作答的页图、文字。
 
 ```bash
-.venv/bin/python evaluate.py --doc-id YOUR_DOCUMENT_ID --cases annotated-questions.json
+cp .env.example .env
+# 填好 .env 后启动 Agent
+.venv/bin/python serve.py --models ./models \
+  --qa-mode agent --answer-env-file .env --answer-compact-images \
+  --visual-python .visual-venv/bin/python --visual-device cuda:0 \
+  --visual-base-model ./models/qwen-vl
 ```
 
-`fork/raganything` 包含上游 Python 源码及 Demo 的检索、补读、表格处理等改动。许可证见 [LICENSE](LICENSE)。
+访问 <http://127.0.0.1:8094>，上传 PDF 后提问。普通上传支持不超过 20 MB、40 页的 PDF。ColQwen2.5 默认使用固定版本的 `vidore/colqwen2.5-v0.2`，已有本地快照可通过 `--visual-model` 指定。
 
-## 视觉问答补读实验
+要先验证上传、解析和页码引用，也可运行 `.venv/bin/python serve.py --models ./models`，使用本地 Qwen2.5-VL 静态作答。静态模式可通过 `--answer-page-limit` 调整证据页上限，通过 `--review-on-refusal` 开启拒答补读。
 
-[视觉问答补读实验](experiments/README.md)
+## 仓库入口
+
+| 文件 | 用途 |
+| --- | --- |
+| [serve.py](serve.py) · [index.html](index.html) | 上传、文档索引、问答 API 和 Web 界面 |
+| [resume_retrieval.py](fork/raganything/resume_retrieval.py) · [resume_tables.py](fork/raganything/resume_tables.py) | 正文、图表索引，候选块召回与证据页构建 |
+| [visual_index.py](fork/raganything/visual_index.py) · [rank_fusion.py](fork/raganything/rank_fusion.py) | 页图编码、视觉检索与排序融合 |
+| [agent_qa.py](fork/raganything/agent_qa.py) · [answer_relay.py](answer_relay.py) | 工具调用、证据读取与模型网关 |
+| [evaluate.py](evaluate.py) · [experiments/](experiments/) | 单份 PDF 的接口评测、数据集评测和历史实验 |
+
+项目基于 [RAG-Anything 1.4.4](https://github.com/HKUDS/RAG-Anything/tree/019d6fdcfe635ed66fc096e4cf23376389e9de21)。上游源码与本文档问答的扩展位于 [fork/raganything/](fork/raganything/)。许可证见 [LICENSE](LICENSE)。

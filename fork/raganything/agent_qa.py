@@ -161,13 +161,17 @@ class PdfEvidence:
         raise ValueError('Unknown PDF tool.')
 
 
-async def agent_answer(retriever, question, relay, *, vector=None):
+async def agent_answer(retriever, question, relay, *, vector=None, on_progress=None):
+    if on_progress:
+        on_progress('retrieving')
     if vector is None:
         vector = (await retriever.models.embed([question]))[0]
     ranked, trace, _, scoped = await ResumeRetriever.rank_answer_pages(retriever, question, vector, translate=False)
     evidence = PdfEvidence(retriever, question, ranked, scoped)
     initial = [row['page'] for row in ranked[:INITIAL_PAGES]]
     starter = await evidence.open(initial)
+    if on_progress and evidence.opened:
+        on_progress('opened', pages=[page for page in initial if page in evidence.opened])
     starter.append(await evidence.summaries([row['page'] for row in ranked[INITIAL_PAGES:12]], question))
     starter.append(text('Question: ' + question))
     messages = [{'role': 'system', 'content': PROMPT}, {'role': 'user', 'content': starter}]
@@ -175,6 +179,8 @@ async def agent_answer(retriever, question, relay, *, vector=None):
     for round_no in range(1, MAX_TURNS + 1):
         if round_no == MAX_TURNS:
             messages.append({'role': 'user', 'content': FINAL_ROUND})
+        if on_progress:
+            on_progress('finalizing' if round_no == MAX_TURNS else 'reading', round=round_no)
         turn = await asyncio.to_thread(relay.complete_tools, messages, 450, TOOLS, allow_tools=round_no < MAX_TURNS)
         if not turn.calls:
             output = json_object(turn.text)
@@ -187,7 +193,16 @@ async def agent_answer(retriever, question, relay, *, vector=None):
             try:
                 if index >= MAX_CALLS_PER_TURN:
                     raise ValueError('At most three tool actions can be executed per round.')
+                opened_before = evidence.opened.copy() if on_progress and call.name == 'open_pages' else None
+                if on_progress and call.name == 'search_pages':
+                    on_progress('searching')
+                if on_progress and call.name == 'crop_region':
+                    on_progress('zooming')
                 content, pages = await evidence.call(call.name, call.arguments)
+                if opened_before is not None:
+                    new_pages = sorted(evidence.opened - opened_before)
+                    if new_pages:
+                        on_progress('opened', pages=new_pages)
             except ValueError as exc:
                 error = str(exc)
                 content = [text(error)]

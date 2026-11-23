@@ -2,12 +2,13 @@
 import argparse
 import asyncio
 import json
+import json
 import logging
 import math
 import os
 import shutil
 import signal
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager, nullcontext, suppress
 from pathlib import Path
 from typing import Literal
 from uuid import UUID, uuid4
@@ -16,7 +17,7 @@ import pymupdf
 import uvicorn
 from dotenv import dotenv_values
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from answer_relay import AnswerAPIError, AnswerRelay
@@ -130,9 +131,12 @@ class PdfLibrary:
         return await asyncio.to_thread(LocalModels, self.args.models, self.args.device,
                                        self.args.answer_model, self.args.answer_batch_size, self.answer_relay)
 
-    async def answer(self, retriever, question, *, visual=True, **options):
+    async def answer(self, retriever, question, *, visual=True, on_progress=None, **options):
         if self.qa_mode == 'agent' and visual:
-            return await agent_answer(retriever, question, self.answer_relay, vector=options.get('vector'))
+            return await agent_answer(retriever, question, self.answer_relay, vector=options.get('vector'),
+                                      on_progress=on_progress)
+        if on_progress:
+            on_progress('answering')
         return await retriever.answer(question, visual=visual, **options)
 
     async def parse(self, directory):
@@ -349,16 +353,63 @@ def make_app(args):
             image = pdf_page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False)
             return Response(image.tobytes('jpeg'), media_type='image/jpeg')
 
+    async def answer_document(doc_id, question, visual, on_progress=None):
+        lock = index_locks.setdefault(doc_id, asyncio.Lock()) if library.benchmark else nullcontext()
+        if on_progress and (library.lock.locked() or (library.benchmark and lock.locked())):
+            on_progress('waiting')
+        async with lock, library.lock:
+            metadata = library.metadata(doc_id)
+            if on_progress and library.active_id != doc_id:
+                on_progress('preparing_document')
+            demo = await library.activate(doc_id, metadata)
+            return await library.answer(demo, question, visual=visual, on_progress=on_progress)
+
     @app.post('/api/documents/{doc_id}/ask')
     async def ask(doc_id: UUID, query: Question):
         question = query.question.strip()
         if not question:
             raise HTTPException(400, '请输入问题')
-        lock = index_locks.setdefault(doc_id, asyncio.Lock()) if library.benchmark else nullcontext()
-        async with lock, library.lock:
-            metadata = library.metadata(doc_id)
-            demo = await library.activate(doc_id, metadata)
-            return await library.answer(demo, question, visual=query.visual)
+        return await answer_document(doc_id, question, query.visual)
+
+    @app.post('/api/documents/{doc_id}/ask/stream')
+    async def ask_stream(doc_id: UUID, query: Question):
+        question = query.question.strip()
+        if not question:
+            raise HTTPException(400, '请输入问题')
+
+        async def events():
+            queue = asyncio.Queue()
+
+            def progress(stage, **details):
+                queue.put_nowait({'type': 'progress', 'stage': stage, **details})
+
+            async def run_answer():
+                try:
+                    result = await answer_document(doc_id, question, query.visual, progress)
+                except HTTPException as exc:
+                    queue.put_nowait({'type': 'error', 'message': str(exc.detail)})
+                except AnswerAPIError as exc:
+                    queue.put_nowait({'type': 'error', 'message': str(exc)})
+                except Exception:
+                    LOG.exception('Streaming answer failed for document %s', doc_id)
+                    queue.put_nowait({'type': 'error', 'message': '处理问题失败，请稍后重试。'})
+                else:
+                    queue.put_nowait({'type': 'answer', 'data': result})
+
+            task = asyncio.create_task(run_answer())
+            try:
+                while True:
+                    event = await queue.get()
+                    yield json.dumps(event, ensure_ascii=False) + '\n'
+                    if event['type'] != 'progress':
+                        break
+            finally:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+
+        return StreamingResponse(events(), media_type='application/x-ndjson',
+                                 headers={'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no'})
 
     return app
 

@@ -28,6 +28,14 @@
     textarea { display:block; min-height:86px; width:100%; resize:vertical; font:inherit; padding:10px 12px; border:1px solid #aebdc4; border-radius:7px; }
     .actions { margin-top:12px; display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
     .answer { margin-top:18px; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .progress { padding:10px 13px; border:1px solid var(--border); border-radius:8px; background:#f6faf9; }
+    .progress summary { color:var(--ink); font-weight:600; }
+    .progress-time { float:right; color:var(--muted); font-weight:400; font-variant-numeric:tabular-nums; }
+    .progress ol { margin:9px 0 0; padding:0; list-style:none; }
+    .progress li { display:flex; gap:9px; align-items:baseline; color:var(--muted); font-size:14px; }
+    .progress li::before { content:""; flex:0 0 6px; height:6px; border-radius:50%; background:#a4bbb8; }
+    .progress[data-running] li:last-child { color:var(--ink); }
+    .progress[data-running] li:last-child::before { background:var(--green); }
     #preview { width:100%; max-height:430px; object-fit:contain; border:1px solid var(--border); background:#f8f9fa; border-radius:8px; }
     a { color:var(--green); }
     details { margin-top:16px; }
@@ -63,9 +71,13 @@
         <textarea id="question" maxlength="400" placeholder="输入你想在这份 PDF 中查找的问题" required></textarea>
         <div class="actions">
           <button id="submit" class="primary">检索并回答</button>
-          <label><input id="visual" type="checkbox" checked> 把命中的原图交给模型</label>
+          <label><input id="visual" type="checkbox" checked> 使用页图辅助回答</label>
         </div>
       </form>
+      <details id="progress" class="progress" hidden>
+        <summary>处理进度 <span id="progress-time" class="progress-time"></span></summary>
+        <ol id="progress-log" aria-live="polite" aria-relevant="additions"></ol>
+      </details>
       <p id="status" class="muted" role="status"></p>
       <div id="answer" class="answer" aria-live="polite"></div>
       <details id="trace-pane" hidden><summary>查看检索与证据核验</summary><pre id="trace"></pre></details>
@@ -75,7 +87,7 @@
       <p class="muted">检索后可切换到候选证据页。</p>
       <div id="pages" class="buttons"></div>
       <a id="preview-link" target="_blank" rel="noopener"><img id="preview" alt="当前 PDF 页"></a>
-      <p><a id="document" target="_blank" rel="noopener">打开原始 PDF</a> · <a href="/docs">API 文档</a></p>
+      <p><a id="document" target="_blank" rel="noopener">打开原始 PDF</a></p>
     </section>
   </div>
 </main>
@@ -85,8 +97,7 @@
   const benchmarkDocuments = new Map();
   const sessionKey = 'multimodal-active-pdf';
 
-  async function api(url, options) {
-    const response = await fetch(url, options);
+  async function responseJson(response) {
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
       const message = typeof data.detail === 'string' ? data.detail : '请求失败（' + response.status + '）';
@@ -95,6 +106,61 @@
       throw error;
     }
     return data;
+  }
+
+  async function api(url, options) {
+    return responseJson(await fetch(url, options));
+  }
+
+  function showProgress(event) {
+    const messages = {
+      waiting: '等待前一个请求完成',
+      preparing_document: '正在加载文档索引',
+      retrieving: '正在检索文本和页图',
+      opened: '已打开第 ' + (event.pages || []).join('、') + ' 页',
+      reading: '正在核对已打开的证据（第 ' + event.round + ' 轮）',
+      searching: '正在搜索补充证据',
+      zooming: '正在放大页面局部',
+      finalizing: '正在整理答案和页码引用',
+      answering: '正在检索证据并生成答案'
+    };
+    const message = messages[event.stage];
+    const log = get('progress-log');
+    if (!message || log.lastElementChild?.textContent === message) return;
+    const item = document.createElement('li');
+    item.textContent = message;
+    log.append(item);
+  }
+
+  async function questionStream(payload) {
+    const response = await fetch(documentUrl() + '/ask/stream', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(payload)
+    });
+    if (!response.ok) await responseJson(response);
+    if (!response.body) throw new Error('无法接收作答进度。');
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    try {
+      while (true) {
+        const {done, value} = await reader.read();
+        buffer += decoder.decode(value, {stream:!done});
+        const lines = buffer.split('\n');
+        buffer = done ? '' : lines.pop();
+        for (const line of lines) {
+          if (!line) continue;
+          const event = JSON.parse(line);
+          if (event.type === 'progress') showProgress(event);
+          if (event.type === 'answer') return event.data;
+          if (event.type === 'error') throw new Error(event.message);
+        }
+        if (done) throw new Error('作答连接已断开，请重试。');
+      }
+    } finally {
+      await reader.cancel().catch(() => {});
+      reader.releaseLock();
+    }
   }
 
   function documentUrl() {
@@ -119,6 +185,7 @@
     get('question').value = '';
     get('answer').textContent = '';
     get('status').textContent = '';
+    get('progress').hidden = true;
     get('pages').replaceChildren();
     get('trace-pane').hidden = true;
     get('trace-pane').open = false;
@@ -164,16 +231,23 @@
     if (!activeDocument || !question) return;
     busy(true);
     const benchmarkDocument = benchmarkDocuments.get(activeDocument.id);
-    get('status').textContent = benchmarkDocument && !benchmarkDocument.indexed
-      ? '正在首次解析并建立索引，完成后会继续回答。' : '正在检索并生成回答。';
+    const progress = get('progress');
+    progress.hidden = false;
+    progress.open = true;
+    progress.setAttribute('data-running', '');
+    get('progress-log').replaceChildren();
+    get('status').textContent = '';
     get('answer').textContent = '';
     get('trace-pane').hidden = true;
     get('pages').replaceChildren();
+    const started = performance.now();
+    const updateTime = () => {
+      get('progress-time').textContent = ((performance.now() - started) / 1000).toFixed(1) + ' 秒';
+    };
+    updateTime();
+    const timer = setInterval(updateTime, 250);
     try {
-      const data = await api(documentUrl() + '/ask', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({question, visual:get('visual').checked})
-      });
+      const data = await questionStream({question, visual:get('visual').checked});
       if (benchmarkDocument) benchmarkDocument.indexed = true;
       get('answer').textContent = data.answer;
       for (const citation of data.citations || []) {
@@ -196,9 +270,13 @@
         get('pages').append(button);
       }
       get('status').textContent = data.cache_hit ? '已命中缓存' : '本次使用图像 ' + data.images_seen_by_model + ' 张';
+      progress.open = false;
     } catch (error) {
       get('status').textContent = error.message;
     } finally {
+      clearInterval(timer);
+      updateTime();
+      progress.removeAttribute('data-running');
       busy(false);
     }
   });
